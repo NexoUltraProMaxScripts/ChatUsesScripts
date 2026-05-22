@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', 'Segoe UI', sans-serif;
+            background: transparent;
+            color: white;
+            overflow: hidden;
+        }
+
+        #chat-container {
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            height: 520px;
+            width: 420px;
+            padding: 8px;
+            gap: 6px;
+        }
+
+        #messages-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .chat-message {
+            background: linear-gradient(135deg, rgba(10, 15, 35, 0.95) 0%, rgba(15, 25, 55, 0.95) 100%);
+            padding: 10px 16px;
+            border-radius: 8px;
+            border-left: 3px solid #ffca28;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.6);
+            line-height: 1.5;
+            word-break: break-word;
+        }
+
+        .chat-message.new {
+            animation: slideIn 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+        }
+
+        .chat-message:nth-child(5n+1) { border-left-color: #ffca28; }
+        .chat-message:nth-child(5n+2) { border-left-color: #00e5ff; }
+        .chat-message:nth-child(5n+3) { border-left-color: #69ff47; }
+        .chat-message:nth-child(5n+4) { border-left-color: #ff6d6d; }
+        .chat-message:nth-child(5n+5) { border-left-color: #d47eff; }
+
+        .author {
+            font-weight: 700;
+            font-size: 16px;
+            letter-spacing: 0.3px;
+            margin-right: 6px;
+        }
+
+        .chat-message:nth-child(5n+1) .author { color: #ffca28; }
+        .chat-message:nth-child(5n+2) .author { color: #00e5ff; }
+        .chat-message:nth-child(5n+3) .author { color: #69ff47; }
+        .chat-message:nth-child(5n+4) .author { color: #ff6d6d; }
+        .chat-message:nth-child(5n+5) .author { color: #d47eff; }
+
+        .msg-text {
+            color: #e8eaf0;
+            font-size: 17px;
+            font-weight: 400;
+        }
+
+        #running-cmd {
+            display: none;
+            background: linear-gradient(90deg, #b71c1c, #e53935);
+            padding: 10px 14px;
+            font-weight: 700;
+            font-size: 16px;
+            border-radius: 8px;
+            box-shadow: 0 0 16px rgba(229, 57, 53, 0.5);
+            letter-spacing: 0.4px;
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        #running-cmd::before {
+            content: "▶ ";
+            opacity: 0.85;
+        }
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(-30px); }
+            to   { opacity: 1; transform: translateX(0); }
+        }
+
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 0 16px rgba(229, 57, 53, 0.5); }
+            50%       { box-shadow: 0 0 26px rgba(229, 57, 53, 0.85); }
+        }
+    </style>
+</head>
+<body>
+    <div id="chat-container">
+        <div id="messages-list"></div>
+        <div id="running-cmd"></div>
+    </div>
+
+    <script>
+        async function refresh() {
+            try {
+                const res = await fetch('overlay.json?v=' + Date.now(), {
+                    cache: "no-store",
+                    headers: { 'Cache-Control': 'no-cache' }
+                });
+                if (!res.ok) return;
+                const data = await res.json();
+                if (!data?.chat) return;
+
+                const cmdEl = document.getElementById('running-cmd');
+                if (data.running_command) {
+                    cmdEl.textContent = data.running_command;
+                    cmdEl.style.display = 'block';
+                } else {
+                    cmdEl.style.display = 'none';
+                }
+
+                const list = document.getElementById('messages-list');
+                const currentIds = new Set();
+
+                data.chat.forEach(msg => {
+                    const id = msg.id;
+                    currentIds.add(id);
+
+                    let el = document.getElementById(id);
+                    if (!el) {
+                        el = document.createElement('div');
+                        el.className = 'chat-message new';
+                        el.id = id;
+                        el.innerHTML = `<span class="author">${escapeHtml(msg.author)}:</span> <span class="msg-text">${escapeHtml(msg.message)}</span>`;
+                        list.appendChild(el);
+                        setTimeout(() => el.classList.remove('new'), 400);
+                    } else {
+                        const authorSpan = el.querySelector('.author');
+                        const textSpan = el.querySelector('.msg-text');
+                        if (authorSpan.textContent !== msg.author + ':') authorSpan.textContent = msg.author + ':';
+                        if (textSpan.textContent !== msg.message) textSpan.textContent = msg.message;
+                    }
+                });
+
+                Array.from(list.children).forEach(child => {
+                    if (!currentIds.has(child.id)) child.remove();
+                });
+
+            } catch (e) {
+                console.error("Refresh error:", e);
+            }
+        }
+
+        function escapeHtml(str) {
+            return str
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;");
+        }
+
+        setInterval(refresh, 400);
+        refresh();
+    </script>
+</body>
+</html>
