@@ -27,11 +27,10 @@ COOLDOWN = {"startvm": 45}
 VOTE_DURATION = 100
 REQUIRED_VOTES = 2
 # We write here which command will open which file
-VM_DATABASE = {
-    "win10": r"D:\VMSVMWARE\w8\Windows 10 x64.vmx", # Write your own path buddy
-    "win8": r"D:\VMSVMWARE\w88\Windows 8.x x64.vmx",
-    "win7": r"D:\w777\Windows 7 x64.vmx"
-}
+# VM_DATABASE
+    #"win10": r"D:\VMSVMWARE\w8\Windows 10 x64.vmx", # Write your own path buddy
+    #"win8": r"D:\VMSVMWARE\w88\Windows 8.x x64.vmx",
+    #"win7": r"D:\w777\Windows 7 x64.vmx"
 
 VOTE_SETTINGS = {
     "duration": 60,      # How many seconds should the voting last?
@@ -43,13 +42,13 @@ votes = {"restartvm": [], "revert": []}
 last_command_time = {}
 
 # ========================= ULTIMATE SCANCODE MAP =========================
-# We use direct X11 Machine codes (Keysym) to bypass the bugs of the vncdotool library
+# We use direct X11 keysym codes to bypass bugs in the vncdotool library
 SCANCODE_MAP = {
     "esc": chr(0xff1b), "escape": chr(0xff1b),
     "tab": chr(0xff09),
     "enter": chr(0xff0d), "return": chr(0xff0d),
     "space": " ",
-    "backspace": chr(0xff08),  # HERE IS YOUR REMEDY!
+    "backspace": chr(0xff08),
     "delete": chr(0xffff), "del": chr(0xffff),
     "insert": chr(0xff63), "ins": chr(0xff63),
     "home": chr(0xff50),
@@ -134,6 +133,8 @@ class VMController:
         self.client = None
         self.cursor_x = 512
         self.cursor_y = 384
+        self._lock = asyncio.Lock()  # Prevents concurrent VNC operations (fixes stuck keys)
+        self._abort_hold = False     # Emergency signal to interrupt an active hold
 
     async def connect_fresh(self):
         await self._disconnect()
@@ -157,20 +158,23 @@ class VMController:
         if self.client:
             try: self.client.disconnect()
             except: pass
-        self.client = None        
+        self.client = None
 
     async def send_key(self, key: str):
+        # FIX: Lock the entire operation so no other command can call connect_fresh()
+        # mid-execution and disconnect the client, which was causing keys to get stuck.
+        async with self._lock:
             client = await self.connect_fresh()
             if not client: return False
             try:
                 loop = asyncio.get_event_loop()
                 clean_key = key.strip().lower()
-                
-                # We get the real equivalent from SCANCODE_MAP
+
+                # Resolve the key to its keysym via SCANCODE_MAP
                 mapped_key = SCANCODE_MAP.get(clean_key, clean_key)
 
                 if "+" in key:
-                    # Combo (Ctrl+C etc.) operations here (same as existing code)
+                    # Combo keys (e.g. Ctrl+C, Win+R)
                     keys = key.split("+")
                     mapped_keys = [SCANCODE_MAP.get(k.strip().lower(), k.strip().lower()) for k in keys]
                     try:
@@ -178,59 +182,61 @@ class VMController:
                             await asyncio.wait_for(loop.run_in_executor(None, lambda k2=k: client.keyDown(k2)), timeout=2.0)
                             await asyncio.sleep(0.01)
                     finally:
+                        # Always release all keys, even if keyDown raised an error midway
                         for k in reversed(mapped_keys):
                             try: await asyncio.wait_for(loop.run_in_executor(None, lambda k2=k: client.keyUp(k2)), timeout=2.0)
                             except: pass
                     print(f"⌨️ Combo sent: {'+'.join(mapped_keys)}")
-                
+
                 else:
-                    # --- NEW BLOCK PREVENTING STUCK/FREEZING ---
+                    # Single key: press and release atomically in the same thread
                     def do_safe_press():
                         try:
                             client.keyDown(mapped_key)
                             time.sleep(0.1)
                         finally:
-                            client.keyUp(mapped_key)  # ss
+                            client.keyUp(mapped_key)
 
                     await asyncio.wait_for(loop.run_in_executor(None, do_safe_press), timeout=10.0)
-                    print(f"⌨️ Key sent and forced release: {mapped_key}")
+                    print(f"⌨️ Key sent and released: {mapped_key}")
 
                 return True
-            # Find the 'except Exception as e:' part in your code and update the print like this:
             except Exception as e:
                 print(f"❌ Key Send Error: {str(e)}")
                 import traceback
-                traceback.print_exc() # <--- Add this so we can take an X-ray of the error
+                traceback.print_exc()
 
     async def type_text(self, text: str):
-        client = await self.connect_fresh()
-        if not client: return False
-        try:
-            loop = asyncio.get_event_loop()
-            for char in text:
-                if char.isupper() or char in '!@#$%^&*()_+{}|:"<>?~':
-                    # ARMOR 2: Guarantee Shift when typing uppercase/special characters
-                    try:
-                        await asyncio.wait_for(loop.run_in_executor(None, lambda: client.keyDown(SCANCODE_MAP["shift"])), timeout=2.0)
-                        key_to_send = char.lower() if char.isupper() else char
-                        await asyncio.wait_for(loop.run_in_executor(None, lambda k=key_to_send: client.keyPress(k)), timeout=2.0)
-                    finally:
-                        try:
-                            await asyncio.wait_for(loop.run_in_executor(None, lambda: client.keyUp(SCANCODE_MAP["shift"])), timeout=2.0)
-                        except: pass
-                else:
-                    await asyncio.wait_for(loop.run_in_executor(None, lambda c=char: client.keyPress(c)), timeout=2.0)
-                await asyncio.sleep(0.007)
-            print(f"⌨️ Text sent: {text}")
-            return True
-        except:
-            # If the process fails, release Shift just in case
+        # FIX: Same lock as send_key — prevents connection being torn down mid-typing
+        async with self._lock:
+            client = await self.connect_fresh()
+            if not client: return False
             try:
                 loop = asyncio.get_event_loop()
-                await asyncio.wait_for(loop.run_in_executor(None, lambda: client.keyUp("shift")), timeout=1.0)
-            except: pass
-            await self._disconnect()
-            return False
+                for char in text:
+                    if char.isupper() or char in '!@#$%^&*()_+{}|:"<>?~':
+                        # ARMOR 2: Hold Shift for uppercase / special characters
+                        try:
+                            await asyncio.wait_for(loop.run_in_executor(None, lambda: client.keyDown(SCANCODE_MAP["shift"])), timeout=2.0)
+                            key_to_send = char.lower() if char.isupper() else char
+                            await asyncio.wait_for(loop.run_in_executor(None, lambda k=key_to_send: client.keyPress(k)), timeout=2.0)
+                        finally:
+                            try:
+                                await asyncio.wait_for(loop.run_in_executor(None, lambda: client.keyUp(SCANCODE_MAP["shift"])), timeout=2.0)
+                            except: pass
+                    else:
+                        await asyncio.wait_for(loop.run_in_executor(None, lambda c=char: client.keyPress(c)), timeout=2.0)
+                    await asyncio.sleep(0.007)
+                print(f"⌨️ Text sent: {text}")
+                return True
+            except:
+                # FIX: Was using the raw string "shift" instead of the keysym — keyUp was silently failing
+                try:
+                    loop = asyncio.get_event_loop()
+                    await asyncio.wait_for(loop.run_in_executor(None, lambda: client.keyUp(SCANCODE_MAP["shift"])), timeout=1.0)
+                except: pass
+                await self._disconnect()
+                return False
 
 controller = VMController()
 
@@ -278,7 +284,7 @@ async def get_user_input():
             json.dump(vm_list, f)
         print("✅ Database updated!")
 
-    # --- 3. VM SELECTION (THIS SHOULD EXIT THE LOOP) ---
+    # --- 3. VM SELECTION ---
     print("\nAvailable VMs:")
     for alias in vm_list: print(f" - {alias}")
     
@@ -286,7 +292,7 @@ async def get_user_input():
         selection = input("Select VM name to use: ").strip().lower()
         if selection in vm_list:
             VMX_PATH = vm_list[selection]
-            break # If the selection is correct, break the loop and go down to (platforms)
+            break
         print("❌ Invalid selection. Please type one of the names above.")
 
     # --- 4. PLATFORM SELECTION ---
@@ -305,7 +311,7 @@ def is_on_cooldown(cmd: str) -> bool:
 async def run_vmrun(args: list):
     try:
         if not os.path.exists(VMRUN_PATH): return False
-        # Thanks to loop.run_in_executor, subprocess doesn't freeze the code
+        # run_in_executor prevents subprocess from blocking the async loop
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             None, 
@@ -321,10 +327,8 @@ async def execute_vm_action(vote_type: str):
     update_vote_json()
     
     if vote_type == "restartvm":
-        # Added 'await' to the beginning
         await run_vmrun(["-T", "ws", "reset", VMX_PATH, "hard"])
     elif vote_type == "revert":
-        # Added 'await' to the beginning
         await run_vmrun(["-T", "ws", "revertToSnapshot", VMX_PATH, "snp"])
         await asyncio.sleep(5)
         await run_vmrun(["-T", "ws", "start", VMX_PATH, "gui"])
@@ -389,37 +393,66 @@ async def process_command(message: str, author: str):
             key_name = args[0].lower()
             key = SCANCODE_MAP.get(key_name, key_name)
             hold_duration = float(args[1]) if len(args) > 1 else 1.0
-            hold_duration = min(hold_duration, 3.0)  # ss
-            client = await controller.connect_fresh()
-            if client:
-                loop = asyncio.get_event_loop()
-                try:
-                    await loop.run_in_executor(None, lambda: client.keyDown(key))
-                    await asyncio.sleep(hold_duration)
-                finally:
-                    # ss
+            hold_duration = min(hold_duration, 3.0)
+            controller._abort_hold = False
+            async with controller._lock:
+                client = await controller.connect_fresh()
+                if client:
+                    loop = asyncio.get_event_loop()
+                    key_released = False
                     try:
-                        await loop.run_in_executor(None, lambda: client.keyUp(key))
-                    except:
-                        pass
+                        await loop.run_in_executor(None, lambda: client.keyDown(key))
+                        # Sleep in small steps so the _abort_hold flag can interrupt early
+                        elapsed = 0.0
+                        while elapsed < hold_duration and not controller._abort_hold:
+                            await asyncio.sleep(0.05)
+                            elapsed += 0.05
+                    finally:
+                        try:
+                            await loop.run_in_executor(None, lambda: client.keyUp(key))
+                            key_released = True
+                        except:
+                            pass
+                        if not key_released:
+                            # Recovery: open a fresh connection and force-send keyUp
+                            try:
+                                rc = await asyncio.wait_for(
+                                    loop.run_in_executor(None, lambda: vnc.connect(
+                                        f"{VNC_HOST}::{VNC_PORT}", password=str(VNC_PASSWORD)
+                                    )),
+                                    timeout=5
+                                )
+                                await loop.run_in_executor(None, lambda: rc.keyUp(key))
+                                rc.disconnect()
+                                print(f"⚠️ Key force-released via recovery connection: {key}")
+                            except:
+                                print(f"❌ Recovery keyUp also failed for: {key}")
         elif command == "release" and args:
             client = await controller.connect_fresh()
             if client:
                 key = SCANCODE_MAP.get(args[0].lower(), args[0].lower())
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(None, lambda: client.keyUp(key))
-        # ARMOR 3: Recovery command. If trolls lock the keys, it resets when typed from chat.
+        # ARMOR 3: Recovery command. If keys get stuck, typing this from chat resets them.
         elif command == "releaseall":
+            # Signal any active hold to abort immediately
+            controller._abort_hold = True
+            # Brief wait so the hold loop can notice the flag and exit cleanly
+            await asyncio.sleep(0.15)
             client = await controller.connect_fresh()
             if client:
                 loop = asyncio.get_event_loop()
-                release_keys = ["shift", "ctrl", "alt", "win"]  # ss
+                # Release all modifier keys — deduplicate by keysym value to avoid double-sends
+                release_keys = ["shift", "ctrl", "alt", "win", "capslock", "super", "control", "windows"]
+                released_values = set()
                 for k in release_keys:
-                    mapped = SCANCODE_MAP.get(k, k)  # ss
-                    try:
-                        await loop.run_in_executor(None, lambda key=mapped: client.keyUp(key))
-                    except:
-                        pass
+                    mapped = SCANCODE_MAP.get(k)
+                    if mapped and mapped not in released_values:
+                        released_values.add(mapped)
+                        try:
+                            await loop.run_in_executor(None, lambda key=mapped: client.keyUp(key))
+                        except:
+                            pass
                 print("✅ All modifier keys released.")
         elif command in ["send", "typeenter"] and args:
             await controller.type_text(" ".join(args))
@@ -512,7 +545,6 @@ async def main():
 
     await youtube_loop()
 
-# Move the YouTube loop here from the while True part in your existing code:
 async def youtube_loop():
     while True:
         chat = None
@@ -522,7 +554,7 @@ async def youtube_loop():
             print("📡 Chat Connected")
 
             while chat.is_alive():
-                # 200s chat reset
+                # Reset chat connection every 200 seconds
                 if time.time() - chat_start > 200:
                     print("🔄 Chat Reset")
                     break
