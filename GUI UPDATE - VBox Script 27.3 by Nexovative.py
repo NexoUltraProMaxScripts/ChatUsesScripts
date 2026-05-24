@@ -202,11 +202,27 @@ def get_vm_list():
         return []
 
 VBOXMANAGE_PATH = get_vboxmanage_path()
-COOLDOWN_START = 120
-VOTE_FILE_RESTART = "restart_vote.html"
-VOTE_FILE_REVERT  = "revert_vote.html"
-VOTE_FILE_BAN     = "ban_vote.html"
-STATUS_FILE       = "newstatus.html"
+COOLDOWN_START  = 120
+VOTES_JSON_FILE = "votes.json"
+VOTE_FILE_BAN   = "ban_vote.html"
+STATUS_FILE     = "newstatus.html"
+
+# Shared vote state written to votes.json (read by overlay.html)
+_votes_state = {
+    "restartvm": {"remaining_time": 0, "current": 0, "required": 2},
+    "revert":    {"remaining_time": 0, "current": 0, "required": 2},
+}
+
+def update_votes_json(vote_type: str, current: int, required: int, remaining_time: float = 0):
+    """Write the current vote state for one vote type to votes.json."""
+    _votes_state[vote_type]["current"]        = current
+    _votes_state[vote_type]["required"]       = required
+    _votes_state[vote_type]["remaining_time"] = max(0, int(remaining_time))
+    try:
+        with open(VOTES_JSON_FILE, "w", encoding="utf-8") as f:
+            json.dump(_votes_state, f, separators=(',', ':'))
+    except Exception as e:
+        print(f"[Votes] Write error: {e}")
 BAN_DURATION      = 1800
 VOTE_TIMEOUT      = 120
 SUCCESS_SOUND_FILE = "success.mp3"
@@ -357,50 +373,6 @@ def handle_mouse(cmd, args):
     except Exception as e:
         print(f"[Mouse] Error: {e}")
 
-def update_restart_vote_display(current_votes, required, remaining_time=None, start_time=None):
-    remaining_str = f"Remaining time: {int(remaining_time)} s" if remaining_time is not None else ""
-    js_countdown  = f"<p>{remaining_str}</p>"
-    if start_time is not None:
-        js_countdown = f"""<script>
-        var startTime={start_time*1000};var timeout={VOTE_TIMEOUT*1000};
-        function updateTimer(){{var now=Date.now();var elapsed=now-startTime;
-        var remaining=Math.max(0,timeout-elapsed);var seconds=Math.floor(remaining/1000);
-        document.getElementById('timer').innerText='Remaining time: '+seconds+' s';
-        if(remaining<=0)document.getElementById('timer').innerText='Timed out!';}}
-        setInterval(updateTimer,1000);updateTimer();</script><p id="timer">{remaining_str}</p>"""
-    html = f"""<html><head><style>
-    body{{background:rgba(0,0,0,0);color:white;font-family:Arial;text-align:center;font-size:28px;text-shadow:2px 2px 4px #000;}}
-    #c{{margin-top:40px;padding:20px;background:rgba(0,0,0,0.5);border-radius:12px;display:inline-block;}}
-    h1{{color:#00ff90;}} .progress{{width:80%;height:25px;background:rgba(255,255,255,0.2);border-radius:12px;margin:15px auto;overflow:hidden;}}
-    .bar{{height:100%;width:{int((current_votes/required)*100)}%;background:lime;transition:width 0.5s;}}
-    </style></head><body><div id="c"><h1>Restart Vote</h1>
-    <p>{current_votes}/{required} votes</p>{js_countdown}
-    <div class="progress"><div class="bar"></div></div></div>
-    <script>setInterval(()=>location.reload(),10000);</script></body></html>"""
-    with open(VOTE_FILE_RESTART, "w", encoding="utf-8") as f: f.write(html)
-
-def update_revert_vote_display(current_votes, required, remaining_time=None, start_time=None):
-    remaining_str = f"Remaining time: {int(remaining_time)} s" if remaining_time is not None else ""
-    js_countdown  = f"<p>{remaining_str}</p>"
-    if start_time is not None:
-        js_countdown = f"""<script>
-        var startTime={start_time*1000};var timeout={VOTE_TIMEOUT*1000};
-        function updateTimer(){{var now=Date.now();var elapsed=now-startTime;
-        var remaining=Math.max(0,timeout-elapsed);var seconds=Math.floor(remaining/1000);
-        document.getElementById('timer').innerText='Remaining time: '+seconds+' s';
-        if(remaining<=0)document.getElementById('timer').innerText='Timed out!';}}
-        setInterval(updateTimer,1000);updateTimer();</script><p id="timer">{remaining_str}</p>"""
-    html = f"""<html><head><style>
-    body{{background:rgba(0,0,0,0);color:white;font-family:Arial;text-align:center;font-size:28px;text-shadow:2px 2px 4px #000;}}
-    #c{{margin-top:40px;padding:20px;background:rgba(0,0,0,0.5);border-radius:12px;display:inline-block;}}
-    h1{{color:#00ff90;}} .progress{{width:80%;height:25px;background:rgba(255,255,255,0.2);border-radius:12px;margin:15px auto;overflow:hidden;}}
-    .bar{{height:100%;width:{int((current_votes/required)*100)}%;background:lime;transition:width 0.5s;}}
-    </style></head><body><div id="c"><h1>Revert Vote</h1>
-    <p>{current_votes}/{required} votes</p>{js_countdown}
-    <div class="progress"><div class="bar"></div></div></div>
-    <script>setInterval(()=>location.reload(),10000);</script></body></html>"""
-    with open(VOTE_FILE_REVERT, "w", encoding="utf-8") as f: f.write(html)
-
 def update_ban_vote_display(target, current_votes, required, remaining_time=None):
     action_text   = f"Ban @{target}" if target else "Empty"
     remaining_str = f"Remaining time: {int(remaining_time)} s" if remaining_time is not None else ""
@@ -431,11 +403,11 @@ def vote_timeout_checker():
         current_time = time.time()
         if restart_start_time is not None and current_time - restart_start_time > VOTE_TIMEOUT:
             vote_restart.clear(); restart_start_time = None
-            update_restart_vote_display(0, 3, 0, None)
+            update_votes_json("restartvm", 0, 2, 0)
             print("[Vote] Restart votes timed out")
         if revert_start_time is not None and current_time - revert_start_time > VOTE_TIMEOUT:
             vote_revert.clear(); revert_start_time = None
-            update_revert_vote_display(0, 3, 0, None)
+            update_votes_json("revert", 0, 2, 0)
             print("[Vote] Revert votes timed out")
         to_remove = [t for t, d in ban_votes.items()
                      if 'start_time' in d and current_time - d['start_time'] > VOTE_TIMEOUT]
@@ -594,8 +566,8 @@ class YouTubeChatBot:
                                 if user == ADMIN_USERNAME.lower():
                                     vote_restart.clear(); vote_revert.clear(); ban_votes.clear()
                                     restart_start_time = None; revert_start_time = None
-                                    update_restart_vote_display(0,3)
-                                    update_revert_vote_display(0,3)
+                                    update_votes_json("restartvm", 0, 2, 0)
+                                    update_votes_json("revert",    0, 2, 0)
                                     update_ban_vote_display(None,0,3)
                                     speak_text("Votes cleared by admin!")
                                     print("[Admin] Votes cleared")
@@ -611,8 +583,8 @@ class YouTubeChatBot:
                                 if user in vote_restart: continue
                                 vote_restart[user] = current_time
                                 current   = len(vote_restart)
-                                remaining = max(0, VOTE_TIMEOUT-(current_time-restart_start_time)) if restart_start_time else None
-                                update_restart_vote_display(current, required_votes, remaining, restart_start_time)
+                                remaining = max(0, VOTE_TIMEOUT-(current_time-restart_start_time)) if restart_start_time else 0
+                                update_votes_json("restartvm", current, required_votes, remaining)
                                 if current >= required_votes:
                                     print("[Vote] Restart threshold reached!")
                                     speak_text("Restarting Virtual Machine...")
@@ -621,7 +593,7 @@ class YouTubeChatBot:
                                     update_status("Restarting...")
                                     subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'reset'], check=True)
                                     update_status("Running"); play_success_sound()
-                                    update_restart_vote_display(0, required_votes, 0, None)
+                                    update_votes_json("restartvm", 0, required_votes, 0)
                                     restart_in_progress = False
 
                             elif cmd == 'revert':
@@ -630,8 +602,8 @@ class YouTubeChatBot:
                                 if user in vote_revert: continue
                                 vote_revert[user] = current_time
                                 current   = len(vote_revert)
-                                remaining = max(0, VOTE_TIMEOUT-(current_time-revert_start_time)) if revert_start_time else None
-                                update_revert_vote_display(current, required_votes, remaining, revert_start_time)
+                                remaining = max(0, VOTE_TIMEOUT-(current_time-revert_start_time)) if revert_start_time else 0
+                                update_votes_json("revert", current, required_votes, remaining)
                                 if current >= required_votes:
                                     print("[Vote] Revert threshold reached!")
                                     speak_text("Reverting Virtual Machine...")
@@ -644,7 +616,7 @@ class YouTubeChatBot:
                                     time.sleep(3)
                                     subprocess.run([VBOXMANAGE_PATH,'startvm',VM_NAME], check=True)
                                     update_status("Running"); play_success_sound()
-                                    update_revert_vote_display(0, required_votes, 0, None)
+                                    update_votes_json("revert", 0, required_votes, 0)
                                     revert_in_progress = False
 
                             elif cmd == 'ban':
@@ -1189,7 +1161,7 @@ class UltraBotGUI:
                 vote_revert.clear()
                 revert_start_time = None
                 revert_in_progress = False
-                update_revert_vote_display(0, 3)
+                update_votes_json("revert", 0, 2, 0)
                 self.root.after(0, lambda: self._vm_set_last("Reverted ✔", self.GREEN))
             except Exception as e:
                 revert_in_progress = False
@@ -1326,11 +1298,11 @@ class UltraBotGUI:
                 subprocess.run([VBOXMANAGE_PATH, 'startvm', VM_NAME], check=True)
                 update_status("Running"); play_success_sound()
                 vote_revert.clear(); revert_start_time = None; revert_in_progress = False
-                update_revert_vote_display(0, 3)
+                update_votes_json("revert", 0, 2, 0)
             elif c == '!clearvotes':
                 vote_restart.clear(); vote_revert.clear(); ban_votes.clear()
-                update_restart_vote_display(0, 3)
-                update_revert_vote_display(0, 3)
+                update_votes_json("restartvm", 0, 2, 0)
+                update_votes_json("revert",    0, 2, 0)
                 update_ban_vote_display(None, 0, 3)
                 speak_text("Votes cleared by admin!")
                 print("[Admin] Votes cleared")
