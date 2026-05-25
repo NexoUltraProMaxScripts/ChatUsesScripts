@@ -1162,12 +1162,7 @@ class UltraBotGUI:
         self._log(f"[CustomCmd] Testing '{trigger}'...")
 
 
-# ========================= MAIN =========================
-if __name__ == "__main__":
-    load_custom_commands()
-    root = tk.Tk()
-    app  = UltraBotGUI(root)
-    root.mainloop()
+
 def is_on_cooldown(cmd: str) -> bool:
     now = time.time()
     if cmd in last_command_time and now - last_command_time[cmd] < COOLDOWN.get(cmd, 5):
@@ -1531,3 +1526,10 @@ async def youtube_loop():
                     pass
 
         await asyncio.sleep(0.4)
+        
+        # ========================= MAIN =========================
+if __name__ == "__main__":
+    load_custom_commands()
+    root = tk.Tk()
+    app  = UltraBotGUI(root)
+    root.mainloop()
