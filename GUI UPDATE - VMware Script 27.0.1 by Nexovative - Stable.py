@@ -266,12 +266,42 @@ class VMController:
                 ),
                 timeout=8,
             )
+            # Always clear any stuck modifier keys on every fresh connection.
+            # Root cause of the "keyboard locks up" bug: if a previous keyDown
+            # (from !hold, !combo, or type_text) was never followed by a successful
+            # keyUp (due to a timeout / exception / dropped connection), the VNC
+            # server keeps that key marked as "pressed" at the OS level.  Because
+            # VNC keyboard events are injected as real OS input, even physical
+            # keystrokes on the VMware window are then interpreted with that phantom
+            # modifier held — making all input appear broken.  Sending keyUp for
+            # every modifier on each new connection guarantees a clean slate before
+            # every operation.
+            await self._clear_stuck_modifiers(self.client)
             print("Fresh VNC connected.")
             return self.client
         except Exception as e:
             print(f"VNC connect failed: {e}")
             self.client = None
             return None
+
+    async def _clear_stuck_modifiers(self, client):
+        """Send keyUp for every modifier key to clear any stuck VNC keyboard state."""
+        loop = asyncio.get_event_loop()
+        modifier_names = [
+            "shift", "ctrl", "alt", "win", "capslock",
+        ]
+        released: set = set()
+        for name in modifier_names:
+            mapped = SCANCODE_MAP.get(name)
+            if mapped and mapped not in released:
+                released.add(mapped)
+                try:
+                    await asyncio.wait_for(
+                        loop.run_in_executor(None, lambda mk=mapped: client.keyUp(mk)),
+                        timeout=0.5,
+                    )
+                except Exception:
+                    pass
 
     async def _disconnect(self):
         if self.client:
@@ -386,17 +416,9 @@ class VMController:
                 return True
 
             except Exception:
-                # Make sure Shift is not left held down after any error.
-                try:
-                    loop = asyncio.get_event_loop()
-                    await asyncio.wait_for(
-                        loop.run_in_executor(
-                            None, lambda: client.keyUp(SCANCODE_MAP["shift"])
-                        ),
-                        timeout=1.0,
-                    )
-                except Exception:
-                    pass
+                # Clear all modifier keys, not just Shift, in case another
+                # modifier was involved (e.g. a future code path adds Ctrl typing).
+                await self._clear_stuck_modifiers(client)
                 await self._disconnect()
                 return False
 
