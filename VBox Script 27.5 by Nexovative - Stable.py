@@ -484,8 +484,9 @@ class YouTubeChatBot:
                 continue
             try:
                 for c in self.chat.get().sync_items():
-                    msg  = c.message.strip()
-                    user = c.author.name.strip().lower()
+                    msg      = c.message.strip()
+                    user     = c.author.name.strip().lower()
+                    is_owner = getattr(c.author, 'isChatOwner', False)
                     update_overlay(author=user, message=msg, msg_id=c.id)
                     if user in banned_users:
                         if time.time() < banned_users[user]: continue
@@ -579,6 +580,19 @@ class YouTubeChatBot:
 
                             if cmd in ['restart','restartvm']:
                                 if restart_in_progress: continue
+                                # Owner bypass: skip vote, execute immediately
+                                if is_owner:
+                                    print(f"[Vote] Restart bypassed by owner: {user}")
+                                    speak_text("Restarting Virtual Machine...")
+                                    vote_restart.clear(); restart_start_time=None; active_users.clear()
+                                    restart_in_progress = True
+                                    update_status("Restarting...")
+                                    update_votes_json("restartvm", required_votes, required_votes, 0)
+                                    subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'reset'], check=True)
+                                    update_status("Running"); play_success_sound()
+                                    update_votes_json("restartvm", 0, required_votes, 0)
+                                    restart_in_progress = False
+                                    continue
                                 if not vote_restart: restart_start_time = current_time
                                 if user in vote_restart: continue
                                 vote_restart[user] = current_time
@@ -598,6 +612,23 @@ class YouTubeChatBot:
 
                             elif cmd == 'revert':
                                 if revert_in_progress: continue
+                                # Owner bypass: skip vote, execute immediately
+                                if is_owner:
+                                    print(f"[Vote] Revert bypassed by owner: {user}")
+                                    speak_text("Reverting Virtual Machine...")
+                                    vote_revert.clear(); revert_start_time=None; active_users.clear()
+                                    revert_in_progress = True
+                                    update_status("Reverting...")
+                                    update_votes_json("revert", required_votes, required_votes, 0)
+                                    subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'poweroff'], check=True)
+                                    time.sleep(3)
+                                    subprocess.run([VBOXMANAGE_PATH,'snapshot',VM_NAME,'restorecurrent'], check=True)
+                                    time.sleep(3)
+                                    subprocess.run([VBOXMANAGE_PATH,'startvm',VM_NAME], check=True)
+                                    update_status("Running"); play_success_sound()
+                                    update_votes_json("revert", 0, required_votes, 0)
+                                    revert_in_progress = False
+                                    continue
                                 if not vote_revert: revert_start_time = current_time
                                 if user in vote_revert: continue
                                 vote_revert[user] = current_time
