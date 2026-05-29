@@ -3,12 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
-            font-family: 'Inter', 'Segoe UI', sans-serif;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: transparent;
             color: white;
             overflow: hidden;
@@ -19,81 +19,156 @@
             flex-direction: column;
             justify-content: flex-end;
             height: 520px;
-            width: 420px;
-            padding: 8px;
-            gap: 6px;
+            width: 440px;
+            padding: 16px;
+            gap: 14px;
         }
 
         #messages-list {
             display: flex;
             flex-direction: column;
-            gap: 6px;
+            gap: 12px;
         }
 
+        /* Pure Liquid Glass 3D Gel Capsule Simulation */
         .chat-message {
-            background: linear-gradient(135deg, rgba(10, 15, 35, 0.95) 0%, rgba(15, 25, 55, 0.95) 100%);
-            padding: 10px 16px;
-            border-radius: 8px;
-            border-left: 3px solid #ffca28;
-            box-shadow: 0 2px 12px rgba(0,0,0,0.6);
+            position: relative;
+            background: rgba(255, 255, 255, 0.03); /* Keeps background fully alive and vivid */
+            backdrop-filter: blur(25px) saturate(200%);
+            -webkit-backdrop-filter: blur(25px) saturate(200%);
+            
+            padding: 12px 24px 12px 26px;
+            border-radius: 26px; /* Pill capsule shape matching iOS 26 concept */
+            
+            /* Ultra-thin glass rim light */
+            border: 1px solid rgba(255, 255, 255, 0.4);
+            border-top: 1.5px solid rgba(255, 255, 255, 0.65);
+            border-bottom: 1.2px solid rgba(255, 255, 255, 0.2);
+            
+            /* Multi-layered inset shadows to create the 3D liquid volume/bombe effect */
+            box-shadow: 
+                inset 0 12px 16px rgba(255, 255, 255, 0.35),  /* Top inner specular gel highlight */
+                inset 0 -8px 14px rgba(0, 0, 0, 0.15),        /* Bottom deep refraction shadow */
+                inset 0 1px 2px rgba(255, 255, 255, 0.6),      /* Crisp inner border reflection */
+                0 10px 25px rgba(0, 0, 0, 0.25);               /* Smooth drop shadow to lift the capsule */
+                
             line-height: 1.5;
             word-break: break-word;
+            overflow: hidden;
+            transition: all 0.3s ease;
+        }
+
+        /* Top Glossy Lens Highlight Overlay */
+        .chat-message::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 50%;
+            background: linear-gradient(
+                to bottom, 
+                rgba(255, 255, 255, 0.22) 0%, 
+                rgba(255, 255, 255, 0.03) 90%,
+                rgba(255, 255, 255, 0) 100__
+            );
+            border-radius: 26px 26px 4px 4px;
+            pointer-events: none;
+            z-index: 1;
+        }
+
+        /* Sleek Integrated Liquid Accent Pill on the left border edge */
+        .chat-side-pill {
+            position: absolute;
+            left: 6px;
+            top: 14px;
+            bottom: 14px;
+            width: 5px;
+            border-radius: 10px;
+            z-index: 2;
+            box-shadow: inset 0 1px 2px rgba(255, 255, 255, 0.4);
         }
 
         .chat-message.new {
-            animation: slideIn 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+            animation: iOSAppIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
         }
 
-        .chat-message:nth-child(5n+1) { border-left-color: #ffca28; }
-        .chat-message:nth-child(5n+2) { border-left-color: #00e5ff; }
-        .chat-message:nth-child(5n+3) { border-left-color: #69ff47; }
-        .chat-message:nth-child(5n+4) { border-left-color: #ff6d6d; }
-        .chat-message:nth-child(5n+5) { border-left-color: #d47eff; }
+        /* Precise Liquid Color Nodes matching the UI references */
+        .chat-message:nth-child(5n+1) .chat-side-pill { background: #ff3399; box-shadow: 0 0 8px #ff3399; }
+        .chat-message:nth-child(5n+2) .chat-side-pill { background: #ffaa00; box-shadow: 0 0 8px #ffaa00; }
+        .chat-message:nth-child(5n+3) .chat-side-pill { background: #00bfff; box-shadow: 0 0 8px #00bfff; }
+        .chat-message:nth-child(5n+4) .chat-side-pill { background: #00e676; box-shadow: 0 0 8px #00e676; }
+        .chat-message:nth-child(5n+5) .chat-side-pill { background: #ff1744; box-shadow: 0 0 8px #ff1744; }
 
         .author {
-            font-weight: 700;
-            font-size: 16px;
+            font-weight: 800;
+            font-size: 15px;
             letter-spacing: 0.3px;
             margin-right: 6px;
+            position: relative;
+            z-index: 2;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
         }
 
-        .chat-message:nth-child(5n+1) .author { color: #ffca28; }
-        .chat-message:nth-child(5n+2) .author { color: #00e5ff; }
-        .chat-message:nth-child(5n+3) .author { color: #69ff47; }
-        .chat-message:nth-child(5n+4) .author { color: #ff6d6d; }
-        .chat-message:nth-child(5n+5) .author { color: #d47eff; }
+        /* Liquid Text Highlights */
+        .chat-message:nth-child(5n+1) .author { color: #ff66cc; }
+        .chat-message:nth-child(5n+2) .author { color: #ffcc44; }
+        .chat-message:nth-child(5n+3) .author { color: #44ddff; }
+        .chat-message:nth-child(5n+4) .author { color: #55ffaa; }
+        .chat-message:nth-child(5n+5) .author { color: #ff5577; }
 
         .msg-text {
-            color: #e8eaf0;
-            font-size: 17px;
-            font-weight: 400;
+            color: #ffffff;
+            font-size: 15px;
+            font-weight: 600;
+            letter-spacing: 0.1px;
+            position: relative;
+            z-index: 2;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
         }
 
+        /* High-Fidelity Floating Action Bar */
         #running-cmd {
             display: none;
-            background: linear-gradient(90deg, #b71c1c, #e53935);
-            padding: 10px 14px;
+            background: rgba(255, 255, 255, 0.04);
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            padding: 12px 22px;
             font-weight: 700;
-            font-size: 16px;
-            border-radius: 8px;
-            box-shadow: 0 0 16px rgba(229, 57, 53, 0.5);
-            letter-spacing: 0.4px;
-            animation: pulse 1.5s ease-in-out infinite;
+            font-size: 14px;
+            border-radius: 22px;
+            border: 1px solid rgba(255, 255, 255, 0.35);
+            box-shadow: 
+                inset 0 10px 12px rgba(255, 255, 255, 0.25),
+                inset 0 -6px 10px rgba(0, 0, 0, 0.1),
+                0 8px 20px rgba(0, 0, 0, 0.3);
+            letter-spacing: 0.5px;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+            animation: gelPulse 3s ease-in-out infinite;
         }
 
         #running-cmd::before {
-            content: "▶ ";
-            opacity: 0.85;
+            content: "⚡ RUNNING: ";
+            font-weight: 800;
+            color: #ffeb3b;
         }
 
-        @keyframes slideIn {
-            from { opacity: 0; transform: translateX(-30px); }
-            to   { opacity: 1; transform: translateX(0); }
+        @keyframes iOSAppIn {
+            from { 
+                opacity: 0; 
+                transform: translateY(20px) scale(0.95);
+                filter: blur(8px);
+            }
+            to { 
+                opacity: 1; 
+                transform: translateY(0) scale(1);
+                filter: blur(0);
+            }
         }
 
-        @keyframes pulse {
-            0%, 100% { box-shadow: 0 0 16px rgba(229, 57, 53, 0.5); }
-            50%       { box-shadow: 0 0 26px rgba(229, 57, 53, 0.85); }
+        @keyframes gelPulse {
+            0%, 100% { transform: scale(1); opacity: 0.95; }
+            50%       { transform: scale(1.01); opacity: 1; }
         }
     </style>
 </head>
@@ -134,7 +209,11 @@
                         el = document.createElement('div');
                         el.className = 'chat-message new';
                         el.id = id;
-                        el.innerHTML = `<span class="author">${escapeHtml(msg.author)}:</span> <span class="msg-text">${escapeHtml(msg.message)}</span>`;
+                        el.innerHTML = `
+                            <div class="chat-side-pill"></div>
+                            <span class="author">${escapeHtml(msg.author)}:</span> 
+                            <span class="msg-text">${escapeHtml(msg.message)}</span>
+                        `;
                         list.appendChild(el);
                         setTimeout(() => el.classList.remove('new'), 400);
                     } else {
