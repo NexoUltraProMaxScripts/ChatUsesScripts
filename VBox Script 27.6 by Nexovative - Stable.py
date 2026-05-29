@@ -102,7 +102,7 @@ def execute_custom_command(trigger):
             print(f"[CustomCmd] Step error ({action} {args}): {e}")
 
 # ========================= OVERLAY SYSTEM =========================
-overlay_data = {"chat": [], "running_command": ""}
+overlay_data = {"chat": [], "running_command": "", "viewers": None, "likes": None, "subscribers": None}
 seen_message_ids = set()
 last_write_time = 0
 
@@ -127,6 +127,52 @@ def update_overlay(author=None, message=None, running=None, msg_id=None):
             last_write_time = current_time
         except Exception as e:
             print(f"[Overlay Error] {e}")
+
+def fetch_youtube_stats():
+    """Background thread: polls YouTube Data API v3 every 30s for live viewer/like/subscriber counts."""
+    import urllib.request
+    while True:
+        try:
+            if YOUTUBE_API_KEY and VIDEO_ID:
+                # Live viewer count + like count from video resource
+                url_video = (
+                    f"https://www.googleapis.com/youtube/v3/videos"
+                    f"?part=statistics,liveStreamingDetails&id={VIDEO_ID}&key={YOUTUBE_API_KEY}"
+                )
+                with urllib.request.urlopen(url_video, timeout=10) as r:
+                    vdata = json.loads(r.read().decode())
+                items = vdata.get("items", [])
+                if items:
+                    stats = items[0].get("statistics", {})
+                    live  = items[0].get("liveStreamingDetails", {})
+                    overlay_data["viewers"]     = int(live.get("concurrentViewers", 0)) if live.get("concurrentViewers") else None
+                    overlay_data["likes"]       = int(stats.get("likeCount", 0))        if stats.get("likeCount")       else None
+                    # Subscriber count requires channel ID — fetch from video snippet first if not cached
+                    url_snap = (
+                        f"https://www.googleapis.com/youtube/v3/videos"
+                        f"?part=snippet&id={VIDEO_ID}&key={YOUTUBE_API_KEY}"
+                    )
+                    with urllib.request.urlopen(url_snap, timeout=10) as r2:
+                        snap = json.loads(r2.read().decode())
+                    channel_id = snap.get("items", [{}])[0].get("snippet", {}).get("channelId", "")
+                    if channel_id:
+                        url_ch = (
+                            f"https://www.googleapis.com/youtube/v3/channels"
+                            f"?part=statistics&id={channel_id}&key={YOUTUBE_API_KEY}"
+                        )
+                        with urllib.request.urlopen(url_ch, timeout=10) as r3:
+                            cdata = json.loads(r3.read().decode())
+                        sub_count = cdata.get("items", [{}])[0].get("statistics", {}).get("subscriberCount")
+                        overlay_data["subscribers"] = int(sub_count) if sub_count else None
+                    # Write updated stats immediately
+                    try:
+                        with open("overlay.json", "w", encoding="utf-8") as f:
+                            json.dump(overlay_data, f, ensure_ascii=False, separators=(',', ':'))
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[Stats] Fetch error: {e}")
+        time.sleep(30)
 
 def start_overlay_server():
     PORT = 8083
@@ -227,6 +273,7 @@ BAN_DURATION      = 1800
 VOTE_TIMEOUT      = 120
 SUCCESS_SOUND_FILE = "success.mp3"
 ADMIN_USERNAME     = "Nexora-WN"
+YOUTUBE_API_KEY    = ""   # Optional: paste your YouTube Data API v3 key here for live stats
 
 # Global bot state (set at runtime from GUI)
 VIDEO_ID = ""
@@ -242,8 +289,11 @@ banned_users = {}
 ban_votes    = {}
 restart_start_time = None
 revert_start_time  = None
-revert_in_progress  = False
-restart_in_progress = False
+revert_in_progress   = False
+restart_in_progress  = False
+VOTE_ACTION_COOLDOWN = 60          # seconds after a restart/revert before another can be voted
+restart_cooldown_until = 0.0       # epoch time when restart cooldown expires
+revert_cooldown_until  = 0.0       # epoch time when revert cooldown expires
 
 COMMANDS_HELP = """
 Commands (! prefix)
@@ -401,14 +451,29 @@ def vote_timeout_checker():
     while True:
         time.sleep(1)
         current_time = time.time()
-        if restart_start_time is not None and current_time - restart_start_time > VOTE_TIMEOUT:
-            vote_restart.clear(); restart_start_time = None
-            update_votes_json("restartvm", 0, 2, 0)
-            print("[Vote] Restart votes timed out")
-        if revert_start_time is not None and current_time - revert_start_time > VOTE_TIMEOUT:
-            vote_revert.clear(); revert_start_time = None
-            update_votes_json("revert", 0, 2, 0)
-            print("[Vote] Revert votes timed out")
+
+        # Restart: update remaining_time every second so overlay stays in sync
+        if restart_start_time is not None:
+            elapsed = current_time - restart_start_time
+            if elapsed > VOTE_TIMEOUT:
+                vote_restart.clear(); restart_start_time = None
+                update_votes_json("restartvm", 0, 2, 0)
+                print("[Vote] Restart votes timed out")
+            else:
+                remaining = max(0, VOTE_TIMEOUT - elapsed)
+                update_votes_json("restartvm", len(vote_restart), _votes_state["restartvm"]["required"], remaining)
+
+        # Revert: same live update
+        if revert_start_time is not None:
+            elapsed = current_time - revert_start_time
+            if elapsed > VOTE_TIMEOUT:
+                vote_revert.clear(); revert_start_time = None
+                update_votes_json("revert", 0, 2, 0)
+                print("[Vote] Revert votes timed out")
+            else:
+                remaining = max(0, VOTE_TIMEOUT - elapsed)
+                update_votes_json("revert", len(vote_revert), _votes_state["revert"]["required"], remaining)
+
         to_remove = [t for t, d in ban_votes.items()
                      if 'start_time' in d and current_time - d['start_time'] > VOTE_TIMEOUT]
         for t in to_remove:
@@ -454,6 +519,7 @@ class YouTubeChatBot:
         self.last_start_time = 0
         threading.Thread(target=vote_timeout_checker, daemon=True).start()
         threading.Thread(target=watchdog_restart, daemon=True).start()
+        threading.Thread(target=fetch_youtube_stats, daemon=True).start()
 
     def reconnect(self):
         print("[Bot] Reconnecting to YouTube chat...")
@@ -469,7 +535,7 @@ class YouTubeChatBot:
             return False
 
     def run(self):
-        global restart_start_time, revert_start_time, revert_in_progress, restart_in_progress
+        global restart_start_time, revert_start_time, revert_in_progress, restart_in_progress, restart_cooldown_until, revert_cooldown_until
         last_reconnect   = time.time()
         RECONNECT_INTERVAL = 150
         print("[Bot] Waiting for chat messages...")
@@ -580,6 +646,10 @@ class YouTubeChatBot:
 
                             if cmd in ['restart','restartvm']:
                                 if restart_in_progress: continue
+                                if current_time < restart_cooldown_until:
+                                    remaining_cd = int(restart_cooldown_until - current_time)
+                                    print(f"[Vote] Restart on cooldown ({remaining_cd}s left)")
+                                    continue
                                 # Owner bypass: skip vote, execute immediately
                                 if is_owner:
                                     print(f"[Vote] Restart bypassed by owner: {user}")
@@ -589,6 +659,7 @@ class YouTubeChatBot:
                                     update_status("Restarting...")
                                     update_votes_json("restartvm", required_votes, required_votes, 0)
                                     subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'reset'], check=True)
+                                    restart_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
                                     update_status("Running"); play_success_sound()
                                     update_votes_json("restartvm", 0, required_votes, 0)
                                     restart_in_progress = False
@@ -606,12 +677,17 @@ class YouTubeChatBot:
                                     restart_in_progress = True
                                     update_status("Restarting...")
                                     subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'reset'], check=True)
+                                    restart_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
                                     update_status("Running"); play_success_sound()
                                     update_votes_json("restartvm", 0, required_votes, 0)
                                     restart_in_progress = False
 
                             elif cmd == 'revert':
                                 if revert_in_progress: continue
+                                if current_time < revert_cooldown_until:
+                                    remaining_cd = int(revert_cooldown_until - current_time)
+                                    print(f"[Vote] Revert on cooldown ({remaining_cd}s left)")
+                                    continue
                                 # Owner bypass: skip vote, execute immediately
                                 if is_owner:
                                     print(f"[Vote] Revert bypassed by owner: {user}")
@@ -625,6 +701,7 @@ class YouTubeChatBot:
                                     subprocess.run([VBOXMANAGE_PATH,'snapshot',VM_NAME,'restorecurrent'], check=True)
                                     time.sleep(3)
                                     subprocess.run([VBOXMANAGE_PATH,'startvm',VM_NAME], check=True)
+                                    revert_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
                                     update_status("Running"); play_success_sound()
                                     update_votes_json("revert", 0, required_votes, 0)
                                     revert_in_progress = False
@@ -646,6 +723,7 @@ class YouTubeChatBot:
                                     subprocess.run([VBOXMANAGE_PATH,'snapshot',VM_NAME,'restorecurrent'], check=True)
                                     time.sleep(3)
                                     subprocess.run([VBOXMANAGE_PATH,'startvm',VM_NAME], check=True)
+                                    revert_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
                                     update_status("Running"); play_success_sound()
                                     update_votes_json("revert", 0, required_votes, 0)
                                     revert_in_progress = False
