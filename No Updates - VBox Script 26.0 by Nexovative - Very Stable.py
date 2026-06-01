@@ -10,7 +10,7 @@ import http.server
 import socketserver
 import json
 
-# ========================= OVERLAY SYSTEM =========================
+# ========================= OVERLAY SYSTEM ========================
 overlay_data = {"chat": [], "running_command": ""}
 seen_message_ids = set()
 last_write_time = 0
