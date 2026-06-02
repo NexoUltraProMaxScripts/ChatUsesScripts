@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap');
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Space Grotesk', -apple-system, sans-serif;
+            background: transparent;
+            color: #ffffff;
+            overflow: hidden;
+        }
+
+        #chat-container {
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            height: 520px;
+            width: 440px;
+            padding: 16px;
+            gap: 10px;
+        }
+
+        #messages-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        /* Semi-transparent dark card */
+        .chat-message {
+            position: relative;
+            background: rgba(14, 15, 18, 0.72);
+            padding: 10px 15px;
+            border-radius: 10px;
+
+            border: 1px solid rgba(255, 255, 255, 0.07);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+
+            box-shadow:
+                0 4px 24px rgba(0, 0, 0, 0.30),
+                inset 0 1px 0 rgba(255, 255, 255, 0.05);
+
+            line-height: 1.5;
+            word-break: break-word;
+
+            will-change: transform, opacity;
+            transform: translateZ(0);
+        }
+
+        /* Subtle left accent glow per color */
+        .chat-message::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 20%;
+            bottom: 20%;
+            width: 2px;
+            border-radius: 2px;
+            opacity: 0.7;
+        }
+
+        .chat-message:nth-child(5n+1)::before { background: #ff4a7a; }
+        .chat-message:nth-child(5n+2)::before { background: #38bfff; }
+        .chat-message:nth-child(5n+3)::before { background: #00e5a0; }
+        .chat-message:nth-child(5n+4)::before { background: #ffc130; }
+        .chat-message:nth-child(5n+5)::before { background: #b87fff; }
+
+        .chat-message.new {
+            animation: fadeSlideIn 0.3s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+        }
+
+        /* Compact mono badge */
+        .tech-badge {
+            font-family: 'Fira Code', monospace;
+            font-size: 9.5px;
+            font-weight: 500;
+            padding: 1px 5px;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            color: rgba(255, 255, 255, 0.45);
+            border-radius: 4px;
+            text-transform: lowercase;
+            margin-right: 7px;
+            vertical-align: middle;
+            display: inline-block;
+            letter-spacing: 0.3px;
+        }
+
+        /* Author name */
+        .author {
+            font-weight: 700;
+            font-size: 15px;
+            letter-spacing: -0.2px;
+            margin-right: 5px;
+            vertical-align: middle;
+            display: inline-block;
+        }
+
+        .chat-message:nth-child(5n+1) .author { color: #ff4a7a; }
+        .chat-message:nth-child(5n+2) .author { color: #38bfff; }
+        .chat-message:nth-child(5n+3) .author { color: #00e5a0; }
+        .chat-message:nth-child(5n+4) .author { color: #ffc130; }
+        .chat-message:nth-child(5n+5) .author { color: #b87fff; }
+
+        .msg-text {
+            color: #e8eaf2;
+            font-size: 15px;
+            font-weight: 500;
+            letter-spacing: 0.05px;
+            vertical-align: middle;
+            display: inline;
+        }
+
+        /* Running command bar */
+        #running-cmd {
+            display: none;
+            font-family: 'Fira Code', monospace;
+            background: rgba(0, 20, 14, 0.75);
+            color: #00e5a0;
+            padding: 9px 14px;
+            font-weight: 400;
+            font-size: 11.5px;
+            border-radius: 8px;
+            border: 1px solid rgba(0, 229, 160, 0.18);
+            box-shadow: 0 0 16px rgba(0, 229, 160, 0.06);
+            letter-spacing: 0.2px;
+        }
+
+        #running-cmd::before {
+            content: "▸ ";
+            color: rgba(0, 229, 160, 0.5);
+            font-weight: 700;
+        }
+
+        @keyframes fadeSlideIn {
+            0% {
+                opacity: 0;
+                transform: translateY(6px) scale(0.99);
+            }
+            100% {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="chat-container">
+        <div id="messages-list"></div>
+        <div id="running-cmd"></div>
+    </div>
+
+    <script>
+        async function refresh() {
+            try {
+                const res = await fetch('overlay.json?v=' + Date.now(), {
+                    cache: "no-store",
+                    headers: { 'Cache-Control': 'no-cache' }
+                });
+                if (!res.ok) return;
+                const data = await res.json();
+                if (!data?.chat) return;
+
+                const cmdEl = document.getElementById('running-cmd');
+                if (data.running_command) {
+                    cmdEl.textContent = data.running_command;
+                    cmdEl.style.display = 'block';
+                } else {
+                    cmdEl.style.display = 'none';
+                }
+
+                const list = document.getElementById('messages-list');
+                const currentIds = new Set();
+
+                data.chat.forEach(msg => {
+                    const id = msg.id;
+                    currentIds.add(id);
+
+                    let el = document.getElementById(id);
+                    if (!el) {
+                        el = document.createElement('div');
+                        el.className = 'chat-message new';
+                        el.id = id;
+                        el.innerHTML = `
+                            <span class="author">${escapeHtml(msg.author)}:</span>
+                            <span class="msg-text">${escapeHtml(msg.message)}</span>
+                        `;
+                        list.appendChild(el);
+                        setTimeout(() => el.classList.remove('new'), 350);
+                    } else {
+                        const authorSpan = el.querySelector('.author');
+                        const textSpan = el.querySelector('.msg-text');
+                        if (authorSpan && authorSpan.textContent !== msg.author + ':') authorSpan.textContent = msg.author + ':';
+                        if (textSpan && textSpan.textContent !== msg.message) textSpan.textContent = msg.message;
+                    }
+                });
+
+                Array.from(list.children).forEach(child => {
+                    if (!currentIds.has(child.id)) child.remove();
+                });
+
+            } catch (e) {
+                console.error("Refresh error:", e);
+            }
+        }
+
+        function escapeHtml(str) {
+            return str
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;");
+        }
+
+        setInterval(refresh, 400);
+        refresh();
+    </script>
+</body>
+</html>
