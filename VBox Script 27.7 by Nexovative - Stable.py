@@ -128,51 +128,51 @@ def update_overlay(author=None, message=None, running=None, msg_id=None):
         except Exception as e:
             print(f"[Overlay Error] {e}")
 
-def fetch_youtube_stats():
-    """Background thread: polls YouTube Data API v3 every 30s for live viewer/like/subscriber counts."""
-    import urllib.request
-    while True:
-        try:
-            if YOUTUBE_API_KEY and VIDEO_ID:
+# def fetch_youtube_stats():
+  #  """Background thread: polls YouTube Data API v3 every 30s for live viewer/like/subscriber counts."""
+   # import urllib.request
+   # while True:
+      #  try:
+       #     if YOUTUBE_API_KEY and VIDEO_ID:
                 # Live viewer count + like count from video resource
-                url_video = (
-                    f"https://www.googleapis.com/youtube/v3/videos"
-                    f"?part=statistics,liveStreamingDetails&id={VIDEO_ID}&key={YOUTUBE_API_KEY}"
-                )
-                with urllib.request.urlopen(url_video, timeout=10) as r:
-                    vdata = json.loads(r.read().decode())
-                items = vdata.get("items", [])
-                if items:
-                    stats = items[0].get("statistics", {})
-                    live  = items[0].get("liveStreamingDetails", {})
-                    overlay_data["viewers"]     = int(live.get("concurrentViewers", 0)) if live.get("concurrentViewers") else None
-                    overlay_data["likes"]       = int(stats.get("likeCount", 0))        if stats.get("likeCount")       else None
+            #    url_video = (
+                 #   f"https://www.googleapis.com/youtube/v3/videos"
+                 #   f"?part=statistics,liveStreamingDetails&id={VIDEO_ID}&key={YOUTUBE_API_KEY}"
+             #   )
+             #   with urllib.request.urlopen(url_video, timeout=10) as r:
+                #    vdata = json.loads(r.read().decode())
+               # items = vdata.get("items", [])
+               # if items:
+               #     stats = items[0].get("statistics", {})
+               #     live  = items[0].get("liveStreamingDetails", {})
+               #     overlay_data["viewers"]     = int(live.get("concurrentViewers", 0)) if live.get("concurrentViewers") else None
+               #     overlay_data["likes"]       = int(stats.get("likeCount", 0))        if stats.get("likeCount")       else None
                     # Subscriber count requires channel ID — fetch from video snippet first if not cached
-                    url_snap = (
-                        f"https://www.googleapis.com/youtube/v3/videos"
-                        f"?part=snippet&id={VIDEO_ID}&key={YOUTUBE_API_KEY}"
-                    )
-                    with urllib.request.urlopen(url_snap, timeout=10) as r2:
-                        snap = json.loads(r2.read().decode())
-                    channel_id = snap.get("items", [{}])[0].get("snippet", {}).get("channelId", "")
-                    if channel_id:
-                        url_ch = (
-                            f"https://www.googleapis.com/youtube/v3/channels"
-                            f"?part=statistics&id={channel_id}&key={YOUTUBE_API_KEY}"
-                        )
-                        with urllib.request.urlopen(url_ch, timeout=10) as r3:
-                            cdata = json.loads(r3.read().decode())
-                        sub_count = cdata.get("items", [{}])[0].get("statistics", {}).get("subscriberCount")
-                        overlay_data["subscribers"] = int(sub_count) if sub_count else None
+                 #   url_snap = (
+                  #      f"https://www.googleapis.com/youtube/v3/videos"
+                  #      f"?part=snippet&id={VIDEO_ID}&key={YOUTUBE_API_KEY}"
+                  #  )
+                  #  with urllib.request.urlopen(url_snap, timeout=10) as r2:
+                  #      snap = json.loads(r2.read().decode())
+                  #  channel_id = snap.get("items", [{}])[0].get("snippet", {}).get("channelId", "")
+                 #   if channel_id:
+                  #      url_ch = (
+                  #          f"https://www.googleapis.com/youtube/v3/channels"
+                  #          f"?part=statistics&id={channel_id}&key={YOUTUBE_API_KEY}"
+                    #    )
+                   #     with urllib.request.urlopen(url_ch, timeout=10) as r3:
+                   #         cdata = json.loads(r3.read().decode())
+                   #     sub_count = cdata.get("items", [{}])[0].get("statistics", {}).get("subscriberCount")
+                   #     overlay_data["subscribers"] = int(sub_count) if sub_count else None
                     # Write updated stats immediately
-                    try:
-                        with open("overlay.json", "w", encoding="utf-8") as f:
-                            json.dump(overlay_data, f, ensure_ascii=False, separators=(',', ':'))
-                    except Exception:
-                        pass
-        except Exception as e:
-            print(f"[Stats] Fetch error: {e}")
-        time.sleep(30)
+                  #  try:
+                     #   with open("overlay.json", "w", encoding="utf-8") as f:
+                    #        json.dump(overlay_data, f, ensure_ascii=False, separators=(',', ':'))
+                #    except Exception:
+                #        pass
+     #   except Exception as e:
+      #      print(f"[Stats] Fetch error: {e}")
+      #  time.sleep(30)
 
 def start_overlay_server():
     PORT = 8083
@@ -519,7 +519,7 @@ class YouTubeChatBot:
         self.last_start_time = 0
         threading.Thread(target=vote_timeout_checker, daemon=True).start()
         threading.Thread(target=watchdog_restart, daemon=True).start()
-        threading.Thread(target=fetch_youtube_stats, daemon=True).start()
+       # threading.Thread(target=fetch_youtube_stats, daemon=True).start()
 
     def reconnect(self):
         print("[Bot] Reconnecting to YouTube chat...")
