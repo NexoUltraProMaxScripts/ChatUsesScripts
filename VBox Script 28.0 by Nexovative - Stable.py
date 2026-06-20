@@ -283,6 +283,7 @@ mgr  = VirtualBoxManager(None, None)
 vbox = mgr.getVirtualBox()
 
 active_users = set()
+bot_stop_event = threading.Event()   # set this to actually stop the bot + its background threads
 vote_restart = {}
 vote_revert  = {}
 banned_users = {}
@@ -291,9 +292,162 @@ restart_start_time = None
 revert_start_time  = None
 revert_in_progress   = False
 restart_in_progress  = False
+AUTO_START_ENABLED = True   # if False, watchdog_restart will not auto-revive a powered-off VM
+AUTO_START_CONFIG_FILE = "auto_start_config.json"
+
+def load_auto_start_config():
+    global AUTO_START_ENABLED
+    try:
+        if os.path.exists(AUTO_START_CONFIG_FILE):
+            with open(AUTO_START_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            AUTO_START_ENABLED = bool(data.get("enabled", True))
+            print(f"[AutoStart] Config loaded. Enabled={AUTO_START_ENABLED}")
+    except Exception as e:
+        print(f"[AutoStart] Load error: {e}")
+        AUTO_START_ENABLED = True
+
+def save_auto_start_config():
+    try:
+        with open(AUTO_START_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump({"enabled": AUTO_START_ENABLED}, f, indent=2)
+        print(f"[AutoStart] Config saved. Enabled={AUTO_START_ENABLED}")
+    except Exception as e:
+        print(f"[AutoStart] Save error: {e}")
+
 VOTE_ACTION_COOLDOWN = 60          # seconds after a restart/revert before another can be voted
 restart_cooldown_until = 0.0       # epoch time when restart cooldown expires
 revert_cooldown_until  = 0.0       # epoch time when revert cooldown expires
+
+# ========================= OS VOTING SYSTEM =========================
+OS_VOTING_CONFIG_FILE = "os_voting_config.json"
+OS_VOTE_STATUS_FILE   = "os_vote_status.html"
+OS_VOTE_REQUIRED      = 3
+OS_VOTE_TIMEOUT       = 120
+OS_VOTE_SLOTS         = 5
+
+OS_VOTING_ENABLED = False
+OS_LIST = []   # list of dicts: {"name": str, "trigger": str, "vm": str}  (max 5 entries)
+
+os_votes            = {}   # {trigger: set(usernames)}
+os_vote_start_time  = None
+os_switch_in_progress = False
+current_os_vm = None     # currently running OS's VM name (used as active VM_NAME target)
+
+def load_os_voting_config():
+    """Load the OS voting configuration (enabled flag + up to 5 OS entries) from disk."""
+    global OS_VOTING_ENABLED, OS_LIST
+    try:
+        if os.path.exists(OS_VOTING_CONFIG_FILE):
+            with open(OS_VOTING_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            OS_VOTING_ENABLED = bool(data.get("enabled", False))
+            OS_LIST = data.get("os_list", [])[:OS_VOTE_SLOTS]
+            print(f"[OSVoting] Config loaded. Enabled={OS_VOTING_ENABLED}, entries={len(OS_LIST)}")
+    except Exception as e:
+        print(f"[OSVoting] Load error: {e}")
+        OS_VOTING_ENABLED = False
+        OS_LIST = []
+
+def save_os_voting_config():
+    """Persist the OS voting configuration to disk."""
+    try:
+        data = {"enabled": OS_VOTING_ENABLED, "os_list": OS_LIST}
+        with open(OS_VOTING_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        print(f"[OSVoting] Config saved. Enabled={OS_VOTING_ENABLED}, entries={len(OS_LIST)}")
+    except Exception as e:
+        print(f"[OSVoting] Save error: {e}")
+
+def get_os_trigger_map():
+    """Returns {trigger_lower: os_entry} for all valid, fully-configured OS entries."""
+    result = {}
+    for entry in OS_LIST:
+        trig = (entry.get("trigger") or "").strip().lower().lstrip("!")
+        vm   = (entry.get("vm") or "").strip()
+        name = (entry.get("name") or "").strip()
+        if trig and vm and name:
+            result[trig] = entry
+    return result
+
+def update_os_vote_status():
+    """Writes the current OS voting tally to OS_VOTE_STATUS_FILE for the stream overlay."""
+    trigger_map = get_os_trigger_map()
+    rows = ""
+    for trig, entry in trigger_map.items():
+        count = len(os_votes.get(trig, set()))
+        rows += (f"<div class='os-row'><span class='os-name'>{entry['name']} "
+                  f"(!{trig})</span><span class='os-count'>{count}/{OS_VOTE_REQUIRED}</span></div>")
+    active_name = "—"
+    for entry in OS_LIST:
+        if entry.get("vm") == current_os_vm:
+            active_name = entry.get("name", "—")
+            break
+    html = f"""<html><head><style>
+    body{{background:rgba(0,0,0,0);color:white;font-family:Arial;text-align:center;font-size:22px;text-shadow:2px 2px 4px #000;}}
+    #c{{margin-top:20px;padding:16px;background:rgba(0,0,0,0.5);border-radius:12px;display:inline-block;min-width:260px;}}
+    h1{{color:#7c5cbf;font-size:24px;margin:0 0 10px 0;}}
+    .os-row{{display:flex;justify-content:space-between;gap:18px;padding:4px 0;font-size:18px;}}
+    .active{{color:#3ddc97;}}
+    </style></head><body><div id="c">
+    <h1>OS Vote</h1>
+    <p class="active">Currently running: {active_name}</p>
+    {rows if rows else "<p>No OS options configured.</p>"}
+    </div>
+    <script>setInterval(()=>location.reload(),10000);</script></body></html>"""
+    try:
+        with open(OS_VOTE_STATUS_FILE, "w", encoding="utf-8") as f:
+            f.write(html)
+    except Exception as e:
+        print(f"[OSVoting] Status write error: {e}")
+
+def switch_os(target_entry, announce=True):
+    """Powers off the current OS VM (if different) and boots the target OS VM."""
+    global current_os_vm, VM_NAME, os_switch_in_progress, os_votes, os_vote_start_time
+    os_switch_in_progress = True
+    try:
+        target_name = target_entry.get("name", "Unknown OS")
+        target_vm   = target_entry.get("vm", "")
+        if not target_vm:
+            print("[OSVoting] Target entry has no VM assigned, aborting switch.")
+            return
+        if announce:
+            speak_text(f"Switching to {target_name}...")
+        update_status(f"Switching to {target_name}...")
+        if current_os_vm and current_os_vm != target_vm:
+            try:
+                subprocess.run([VBOXMANAGE_PATH, 'controlvm', current_os_vm, 'poweroff'], check=True)
+                time.sleep(3)
+            except Exception as e:
+                print(f"[OSVoting] Poweroff error ({current_os_vm}): {e}")
+        try:
+            subprocess.run([VBOXMANAGE_PATH, 'startvm', target_vm], check=True)
+        except Exception as e:
+            print(f"[OSVoting] Startvm error ({target_vm}): {e}")
+        current_os_vm = target_vm
+        VM_NAME = target_vm
+        update_status(f"Running {target_name}")
+        play_success_sound()
+        print(f"[OSVoting] Switched to '{target_name}' ({target_vm})")
+    finally:
+        os_votes.clear()
+        os_vote_start_time = None
+        update_os_vote_status()
+        os_switch_in_progress = False
+
+def os_vote_timeout_checker():
+    """Background thread: clears stale OS votes after OS_VOTE_TIMEOUT seconds of inactivity."""
+    global os_votes, os_vote_start_time
+    while not bot_stop_event.is_set():
+        if bot_stop_event.wait(1):
+            break
+        if os_vote_start_time is not None:
+            if time.time() - os_vote_start_time > OS_VOTE_TIMEOUT:
+                os_votes.clear()
+                os_vote_start_time = None
+                update_os_vote_status()
+                print("[OSVoting] Votes timed out")
+    print("[OSVoting] Timeout checker stopped.")
 
 COMMANDS_HELP = """
 Commands (! prefix)
@@ -309,6 +463,7 @@ Commands (! prefix)
 !keydown / !keyup
 !wait / !pause        → delay
 !votehelp / !clearvotes
+!win7 !win8 ... → OS voting (if enabled in GUI)
 """
 
 def speak_text(text):
@@ -448,8 +603,9 @@ def update_status(message):
 
 def vote_timeout_checker():
     global vote_restart, vote_revert, ban_votes, restart_start_time, revert_start_time
-    while True:
-        time.sleep(1)
+    while not bot_stop_event.is_set():
+        if bot_stop_event.wait(1):
+            break
         current_time = time.time()
 
         # Restart: update remaining_time every second so overlay stays in sync
@@ -480,19 +636,24 @@ def vote_timeout_checker():
             del ban_votes[t]
             update_ban_vote_display(None, 0, 3)
             print(f"[Vote] Ban vote timed out: {t}")
+    print("[Vote] Timeout checker stopped.")
 
 def watchdog_restart():
     global revert_in_progress
-    while True:
+    while not bot_stop_event.is_set():
         try:
+            if not AUTO_START_ENABLED:
+                if bot_stop_event.wait(10):
+                    break
+                continue
             result = subprocess.run([VBOXMANAGE_PATH, 'showvminfo', VM_NAME, '--machinereadable'],
                                     capture_output=True, text=True)
             lines = [l for l in result.stdout.splitlines() if l.startswith('VMState="')]
             if lines:
                 vm_state = lines[0].split('=')[1].strip('"')
                 if vm_state in ["poweroff", "aborted", "gurumeditation"]:
-                    if revert_in_progress:
-                        print("[Watchdog] Revert in progress, ignoring down state.")
+                    if revert_in_progress or os_switch_in_progress:
+                        print("[Watchdog] Revert/OS-switch in progress, ignoring down state.")
                     else:
                         print(f"[Watchdog] VM down ({vm_state}). Auto-restarting...")
                         update_status("Auto-starting...")
@@ -502,7 +663,9 @@ def watchdog_restart():
                         speak_text("Running")
         except Exception as e:
             print(f"[Watchdog] Error: {e}")
-        time.sleep(10)
+        if bot_stop_event.wait(10):
+            break
+    print("[Watchdog] Stopped.")
 
 class YouTubeChatBot:
     def __init__(self):
@@ -519,6 +682,9 @@ class YouTubeChatBot:
         self.last_start_time = 0
         threading.Thread(target=vote_timeout_checker, daemon=True).start()
         threading.Thread(target=watchdog_restart, daemon=True).start()
+        threading.Thread(target=os_vote_timeout_checker, daemon=True).start()
+        if OS_VOTING_ENABLED:
+            update_os_vote_status()
        # threading.Thread(target=fetch_youtube_stats, daemon=True).start()
 
     def reconnect(self):
@@ -535,21 +701,24 @@ class YouTubeChatBot:
             return False
 
     def run(self):
-        global restart_start_time, revert_start_time, revert_in_progress, restart_in_progress, restart_cooldown_until, revert_cooldown_until
+        global restart_start_time, revert_start_time, revert_in_progress, restart_in_progress, restart_cooldown_until, revert_cooldown_until, os_vote_start_time
         last_reconnect   = time.time()
         RECONNECT_INTERVAL = 150
         print("[Bot] Waiting for chat messages...")
-        while True:
+        while not bot_stop_event.is_set():
             if time.time() - last_reconnect > RECONNECT_INTERVAL:
                 print("[Bot] Periodic reconnect...")
                 self.reconnect()
                 last_reconnect = time.time()
             if not self.chat or not self.chat.is_alive():
                 self.reconnect()
-                time.sleep(5)
+                if bot_stop_event.wait(5):
+                    break
                 continue
             try:
                 for c in self.chat.get().sync_items():
+                    if bot_stop_event.is_set():
+                        break
                     msg      = c.message.strip()
                     user     = c.author.name.strip().lower()
                     is_owner = getattr(c.author, 'isChatOwner', False)
@@ -575,6 +744,33 @@ class YouTubeChatBot:
                                     args=(trigger,), daemon=True
                                 ).start()
                                 continue
+
+                            # ── OS voting commands (e.g. !win7, !win10) ──
+                            if OS_VOTING_ENABLED:
+                                os_trigger_map = get_os_trigger_map()
+                                if cmd in os_trigger_map:
+                                    if os_switch_in_progress:
+                                        continue
+                                    target_entry = os_trigger_map[cmd]
+                                    # Owner bypass: switch immediately, no vote needed
+                                    if is_owner:
+                                        print(f"[OSVoting] Switch bypassed by owner: {user} → {target_entry['name']}")
+                                        threading.Thread(target=switch_os, args=(target_entry,), daemon=True).start()
+                                        continue
+                                    if target_entry.get("vm") == current_os_vm:
+                                        continue  # already running, no point voting for it
+                                    if not os_votes:
+                                        os_vote_start_time = time.time()
+                                    voters = os_votes.setdefault(cmd, set())
+                                    if user in voters:
+                                        continue
+                                    voters.add(user)
+                                    update_os_vote_status()
+                                    print(f"[OSVoting] Vote for '{target_entry['name']}': {len(voters)}/{OS_VOTE_REQUIRED}")
+                                    if len(voters) >= OS_VOTE_REQUIRED:
+                                        print(f"[OSVoting] Threshold reached → switching to {target_entry['name']}")
+                                        threading.Thread(target=switch_os, args=(target_entry,), daemon=True).start()
+                                    continue
 
                             # ── Built-in commands ──
                             if cmd in ['wait', 'pause', 'delay']:
@@ -636,6 +832,8 @@ class YouTubeChatBot:
                                     update_votes_json("restartvm", 0, 2, 0)
                                     update_votes_json("revert",    0, 2, 0)
                                     update_ban_vote_display(None,0,3)
+                                    os_votes.clear(); os_vote_start_time = None
+                                    update_os_vote_status()
                                     speak_text("Votes cleared by admin!")
                                     print("[Admin] Votes cleared")
 
@@ -750,14 +948,24 @@ class YouTubeChatBot:
                                     update_ban_vote_display(None, 0, 3)
 
             except Exception as e:
+                if bot_stop_event.is_set():
+                    break
                 err = str(e).lower()
                 if "timeout" in err or "timed out" in err:
                     print("[Bot] Timeout → reconnecting...")
                 else:
                     print(f"[Bot] Error: {e} → reconnecting...")
                 self.reconnect()
-                time.sleep(5)
-            time.sleep(0.05)
+                if bot_stop_event.wait(5):
+                    break
+            if bot_stop_event.wait(0.05):
+                break
+
+        # Clean shutdown
+        if self.chat:
+            try: self.chat.terminate()
+            except: pass
+        print("[Bot] Stopped.")
 
 
 # ========================= STDOUT REDIRECT =========================
@@ -816,6 +1024,7 @@ class UltraBotGUI:
 
         self._bot_thread   = None
         self._bot_running  = False
+        self._bot_instance = None
         self._console_redir = None
 
         # Edit state for Command Builder
@@ -823,6 +1032,8 @@ class UltraBotGUI:
         self._step_items   = []     # list of {"action":..,"args":..} dicts
 
         self._build_styles()
+        load_os_voting_config()
+        load_auto_start_config()
         self._build_ui()
         load_custom_commands()
         self._refresh_cmd_list()
@@ -890,13 +1101,17 @@ class UltraBotGUI:
         tab1 = ttk.Frame(nb)
         tab2 = ttk.Frame(nb)
         tab3 = ttk.Frame(nb)
+        tab4 = ttk.Frame(nb)
         nb.add(tab1, text="  ▶  Main  ")
         nb.add(tab2, text="  ⚙  Command Builder  ")
         nb.add(tab3, text="  🖥  VM Controls  ")
+        nb.add(tab4, text="  🗳  OS Voting  ")
 
         self._build_main_tab(tab1)
         self._build_cmd_builder_tab(tab2)
         self._build_vm_controls_tab(tab3)
+        self._build_os_voting_tab(tab4)
+        self._sync_main_vm_lock()
 
     # ──────────────── TAB 1 : MAIN ────────────────
     def _build_main_tab(self, parent):
@@ -930,6 +1145,22 @@ class UltraBotGUI:
         ttk.Button(card, text="🔄 Refresh", style="Dim.TButton",
                    command=self._refresh_vm_list).grid(
                    row=1, column=2, pady=(10,0))
+        self._vm_select_note = tk.Label(card, text="", bg=self.BG2,
+                 fg=self.YELLOW, font=("Segoe UI", 8, "italic"))
+        self._vm_select_note.grid(row=2, column=0, columnspan=3, sticky="w", pady=(2,0))
+
+        # Auto-start watchdog toggle
+        tk.Label(card, text="Auto-Start Watchdog", bg=self.BG2,
+                 fg=self.TEXTDIM, font=("Segoe UI",9,"bold")).grid(
+                 row=3, column=0, sticky="w", padx=(0,8), pady=(10,0))
+        self._auto_start_var = tk.BooleanVar(value=AUTO_START_ENABLED)
+        auto_chk = tk.Checkbutton(card,
+            text="Auto-restart the VM if it's found powered off",
+            variable=self._auto_start_var, bg=self.BG2, fg=self.TEXT,
+            selectcolor=self.BG3, activebackground=self.BG2,
+            activeforeground=self.TEXT, font=("Segoe UI", 9),
+            command=self._on_auto_start_toggle)
+        auto_chk.grid(row=3, column=1, columnspan=2, sticky="w", pady=(10,0))
 
         card.columnconfigure(1, weight=1)
 
@@ -1200,6 +1431,160 @@ class UltraBotGUI:
                                           font=("Segoe UI", 9, "bold"))
         self._vm_action_label.pack(side="left")
 
+    # ──────────────── TAB 4 : OS VOTING ────────────────
+    def _build_os_voting_tab(self, parent):
+        parent.configure(style="TFrame")
+
+        header = ttk.Frame(parent, style="TFrame")
+        header.pack(fill="x", padx=16, pady=(16, 4))
+        tk.Label(header, text="Chat OS Voting System",
+                 bg=self.BG, fg=self.ACCENT2,
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        tk.Label(header,
+                 text=(f"Viewers vote with chat commands (e.g. !win7, !win8). "
+                       f"{OS_VOTE_REQUIRED} votes switch the running OS. "
+                       f"The channel owner bypasses voting and switches instantly."),
+                 bg=self.BG, fg=self.TEXTDIM, font=("Segoe UI", 9),
+                 wraplength=760, justify="left").pack(anchor="w", pady=(2, 0))
+
+        # Enable toggle
+        toggle_card = ttk.Frame(parent, style="Card.TFrame", padding=14)
+        toggle_card.pack(fill="x", padx=16, pady=(10, 8))
+        self._os_voting_var = tk.BooleanVar(value=OS_VOTING_ENABLED)
+        chk = tk.Checkbutton(toggle_card,
+            text="Enable OS Voting System (uncheck = single fixed OS, classic mode)",
+            variable=self._os_voting_var, bg=self.BG2, fg=self.TEXT,
+            selectcolor=self.BG3, activebackground=self.BG2,
+            activeforeground=self.TEXT, font=("Segoe UI", 10, "bold"),
+            command=self._on_os_voting_toggle)
+        chk.pack(anchor="w")
+
+        # Scrollable rows card
+        self._os_rows_card = ttk.Frame(parent, style="Card.TFrame", padding=14)
+        self._os_rows_card.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+
+        col_hdr = tk.Frame(self._os_rows_card, bg=self.BG2)
+        col_hdr.pack(fill="x", pady=(0, 6))
+        tk.Label(col_hdr, text="#", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9, "bold"), width=2).grid(row=0, column=0, padx=4)
+        tk.Label(col_hdr, text="Display Name", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9, "bold"), width=18, anchor="w").grid(row=0, column=1, padx=4)
+        tk.Label(col_hdr, text="Chat Trigger", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9, "bold"), width=14, anchor="w").grid(row=0, column=2, padx=4)
+        tk.Label(col_hdr, text="VirtualBox VM", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9, "bold"), width=24, anchor="w").grid(row=0, column=3, padx=4)
+
+        self._os_name_vars    = []
+        self._os_trigger_vars = []
+        self._os_vm_vars      = []
+        self._os_vm_combos    = []
+
+        existing = OS_LIST + [{}] * (OS_VOTE_SLOTS - len(OS_LIST))
+        for i in range(OS_VOTE_SLOTS):
+            entry = existing[i] if i < len(existing) else {}
+            row = tk.Frame(self._os_rows_card, bg=self.BG2)
+            row.pack(fill="x", pady=3)
+
+            tk.Label(row, text=str(i + 1), bg=self.BG2, fg=self.TEXTDIM,
+                     font=("Segoe UI", 9), width=2).grid(row=0, column=0, padx=4)
+
+            name_var = tk.StringVar(value=entry.get("name", ""))
+            ttk.Entry(row, textvariable=name_var, width=18,
+                      font=("Segoe UI", 10)).grid(row=0, column=1, padx=4, ipady=3)
+            self._os_name_vars.append(name_var)
+
+            trig_var = tk.StringVar(value=entry.get("trigger", ""))
+            trig_entry = ttk.Entry(row, textvariable=trig_var, width=14,
+                                    font=("Segoe UI Mono", 10))
+            trig_entry.grid(row=0, column=2, padx=4, ipady=3)
+            self._os_trigger_vars.append(trig_var)
+            tk.Label(row, text="(no ! needed, e.g. win7)", bg=self.BG2, fg=self.TEXTDIM,
+                     font=("Segoe UI", 7)).grid(row=1, column=2, sticky="w", padx=4)
+
+            vm_var = tk.StringVar(value=entry.get("vm", ""))
+            vm_combo = ttk.Combobox(row, textvariable=vm_var, width=24,
+                                     state="readonly", font=("Segoe UI", 9))
+            vm_combo.grid(row=0, column=3, padx=4, ipady=3)
+            self._os_vm_vars.append(vm_var)
+            self._os_vm_combos.append(vm_combo)
+
+        btn_row = tk.Frame(parent, bg=self.BG)
+        btn_row.pack(fill="x", padx=16, pady=(0, 14))
+        ttk.Button(btn_row, text="🔄 Refresh VM List", style="Dim.TButton",
+                   command=self._refresh_os_vm_lists).pack(side="left", padx=(0, 8))
+        ttk.Button(btn_row, text="💾 Save OS Voting Config", style="Green.TButton",
+                   command=self._save_os_voting_config).pack(side="left")
+
+        self._refresh_os_vm_lists()
+        self._set_os_rows_enabled(OS_VOTING_ENABLED)
+
+    def _refresh_os_vm_lists(self):
+        vms = get_vm_list()
+        for combo in self._os_vm_combos:
+            current = combo.get()
+            combo['values'] = vms
+            if current and current in vms:
+                combo.set(current)
+        self._log(f"[OSVoting] VM list refreshed ({len(vms)} found).")
+
+    def _set_os_rows_enabled(self, enabled):
+        state = "readonly" if enabled else "disabled"
+        for combo in self._os_vm_combos:
+            combo.configure(state=state)
+
+    def _on_auto_start_toggle(self):
+        global AUTO_START_ENABLED
+        AUTO_START_ENABLED = self._auto_start_var.get()
+        save_auto_start_config()
+        self._log(f"[AutoStart] Watchdog {'enabled' if AUTO_START_ENABLED else 'disabled'} by user.")
+
+    def _sync_main_vm_lock(self):
+        """Lock the Main tab VM selector when OS Voting is enabled, since the
+        bot then uses the OS Voting tab's list instead."""
+        if OS_VOTING_ENABLED:
+            self._vm_combo.configure(state="disabled")
+            self._vm_select_note.configure(
+                text="🗳 OS Voting is enabled — this selector is ignored. "
+                     "The bot uses the VMs configured in the 'OS Voting' tab.")
+        else:
+            self._vm_combo.configure(state="readonly")
+            self._vm_select_note.configure(text="")
+
+    def _on_os_voting_toggle(self):
+        self._set_os_rows_enabled(self._os_voting_var.get())
+
+    def _save_os_voting_config(self):
+        global OS_VOTING_ENABLED, OS_LIST
+        enabled = self._os_voting_var.get()
+        new_list = []
+        for i in range(OS_VOTE_SLOTS):
+            name = self._os_name_vars[i].get().strip()
+            trig = self._os_trigger_vars[i].get().strip().lower().lstrip("!")
+            vm   = self._os_vm_vars[i].get().strip()
+            if name or trig or vm:
+                new_list.append({"name": name, "trigger": trig, "vm": vm})
+
+        if enabled:
+            valid = [e for e in new_list if e["name"] and e["trigger"] and e["vm"]]
+            if len(valid) < 2:
+                messagebox.showerror("Invalid Configuration",
+                    "OS Voting needs at least 2 fully filled rows "
+                    "(Display Name + Chat Trigger + VM) to be enabled.")
+                return
+            triggers = [e["trigger"] for e in valid]
+            if len(triggers) != len(set(triggers)):
+                messagebox.showerror("Invalid Configuration",
+                    "Chat triggers must be unique across all OS entries.")
+                return
+
+        OS_VOTING_ENABLED = enabled
+        OS_LIST = new_list
+        save_os_voting_config()
+        self._set_os_rows_enabled(enabled)
+        self._sync_main_vm_lock()
+        self._log(f"[OSVoting] Saved. Enabled={enabled}, entries={len(new_list)}")
+        messagebox.showinfo("Saved", "OS Voting configuration saved.")
+
     def _vm_set_last(self, text, color=None):
         self._vm_action_label.configure(
             text=text,
@@ -1327,22 +1712,36 @@ class UltraBotGUI:
 
     # ──────────────── Bot Start / Stop ────────────────
     def _start_bot(self):
-        global VIDEO_ID, VM_NAME
+        global VIDEO_ID, VM_NAME, current_os_vm
         yt  = self._yt_var.get().strip()
         vm  = self._vm_var.get().strip()
         if not yt:
             messagebox.showerror("Missing Input", "Please enter a YouTube Video ID.")
             return
-        if not vm:
-            messagebox.showerror("Missing Input", "Please select a VirtualBox VM.")
-            return
         if self._bot_running:
             self._log("⚠️ Bot is already running!")
             return
 
+        if OS_VOTING_ENABLED:
+            valid_entries = [e for e in OS_LIST if e.get("name") and e.get("trigger") and e.get("vm")]
+            if len(valid_entries) < 2:
+                messagebox.showerror("OS Voting Misconfigured",
+                    "OS Voting is enabled but fewer than 2 valid OS entries are configured.\n"
+                    "Go to the OS Voting tab and fix the configuration, or disable voting.")
+                return
+            VM_NAME = valid_entries[0]["vm"]
+            current_os_vm = VM_NAME
+            self._log(f"[OSVoting] Voting enabled — starting with '{valid_entries[0]['name']}'.")
+        else:
+            if not vm:
+                messagebox.showerror("Missing Input", "Please select a VirtualBox VM.")
+                return
+            VM_NAME = vm
+            current_os_vm = vm
+
         VIDEO_ID = yt
-        VM_NAME  = vm
         self._bot_running = True
+        bot_stop_event.clear()
         self._set_status("Running", self.GREEN)
 
         # Redirect stdout → console
@@ -1351,12 +1750,14 @@ class UltraBotGUI:
 
         self._log(f"Starting bot → YT: {VIDEO_ID}  |  VM: {VM_NAME}")
 
+        self._bot_instance = None
         self._bot_thread = threading.Thread(target=self._run_bot, daemon=True)
         self._bot_thread.start()
 
     def _run_bot(self):
         try:
             bot = YouTubeChatBot()
+            self._bot_instance = bot
             if bot.chat and bot.chat.is_alive():
                 bot.run()
             else:
@@ -1364,10 +1765,23 @@ class UltraBotGUI:
         except Exception as e:
             print(f"[Bot] Fatal error: {e}")
         finally:
+            self._bot_instance = None
             self._bot_running = False
             self.root.after(0, lambda: self._set_status("Stopped", self.RED))
 
     def _stop_bot(self):
+        if not self._bot_running:
+            self._log("Bot is already stopped.")
+            return
+        self._log("Stopping bot... (may take a few seconds to finish current loop)")
+        bot_stop_event.set()
+        # Force the underlying chat connection closed immediately so the
+        # blocking chat.get() call in run() doesn't keep us waiting.
+        if self._bot_instance and self._bot_instance.chat:
+            try:
+                self._bot_instance.chat.terminate()
+            except Exception as e:
+                print(f"[Bot] Error terminating chat connection: {e}")
         self._bot_running = False
         if self._console_redir:
             self._console_redir.stop()
@@ -1413,6 +1827,8 @@ class UltraBotGUI:
                 update_votes_json("restartvm", 0, 2, 0)
                 update_votes_json("revert",    0, 2, 0)
                 update_ban_vote_display(None, 0, 3)
+                os_votes.clear()
+                update_os_vote_status()
                 speak_text("Votes cleared by admin!")
                 print("[Admin] Votes cleared")
             else:
