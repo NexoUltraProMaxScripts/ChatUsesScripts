@@ -57,9 +57,9 @@ def execute_custom_command(trigger):
             if action == "combo":
                 keys = [k.strip().lower() for k in args.replace("+", " ").split()]
                 send_combo(keys)
-            elif action in ("send", "type", "text", "say"):
+            elif action in ("type", "text", "say"):
                 send_keyboard(args)
-            elif action in ("sendenter", "typeenter", "sendline"):
+            elif action in ("send", "sendenter", "typeenter", "sendline"):
                 send_keyboard(args)
                 time.sleep(0.05)
                 send_special_enter()
@@ -336,13 +336,23 @@ current_os_vm = None     # currently running OS's VM name (used as active VM_NAM
 
 def load_os_voting_config():
     """Load the OS voting configuration (enabled flag + up to 5 OS entries) from disk."""
-    global OS_VOTING_ENABLED, OS_LIST
+    global OS_VOTING_ENABLED, OS_LIST, current_os_vm
     try:
         if os.path.exists(OS_VOTING_CONFIG_FILE):
             with open(OS_VOTING_CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             OS_VOTING_ENABLED = bool(data.get("enabled", False))
             OS_LIST = data.get("os_list", [])[:OS_VOTE_SLOTS]
+            saved_vm = data.get("last_active_vm", "")
+            if saved_vm:
+                # Verify the saved VM still exists in the OS list before restoring it
+                valid_vms = [e.get("vm", "") for e in OS_LIST if e.get("vm")]
+                if saved_vm in valid_vms:
+                    current_os_vm = saved_vm
+                    print(f"[OSVoting] Restored last active VM: {saved_vm}")
+                else:
+                    current_os_vm = None
+                    print(f"[OSVoting] Saved VM '{saved_vm}' no longer in OS list, ignoring.")
             print(f"[OSVoting] Config loaded. Enabled={OS_VOTING_ENABLED}, entries={len(OS_LIST)}")
     except Exception as e:
         print(f"[OSVoting] Load error: {e}")
@@ -352,10 +362,14 @@ def load_os_voting_config():
 def save_os_voting_config():
     """Persist the OS voting configuration to disk."""
     try:
-        data = {"enabled": OS_VOTING_ENABLED, "os_list": OS_LIST}
+        data = {
+            "enabled":        OS_VOTING_ENABLED,
+            "os_list":        OS_LIST,
+            "last_active_vm": current_os_vm or "",
+        }
         with open(OS_VOTING_CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        print(f"[OSVoting] Config saved. Enabled={OS_VOTING_ENABLED}, entries={len(OS_LIST)}")
+        print(f"[OSVoting] Config saved. Enabled={OS_VOTING_ENABLED}, entries={len(OS_LIST)}, last_vm={current_os_vm}")
     except Exception as e:
         print(f"[OSVoting] Save error: {e}")
 
@@ -428,6 +442,7 @@ def switch_os(target_entry, announce=True):
         VM_NAME = target_vm
         update_status(f"Running {target_name}")
         play_success_sound()
+        save_os_voting_config()   # persist last active VM so bot remembers it on next launch
         print(f"[OSVoting] Switched to '{target_name}' ({target_vm})")
     finally:
         os_votes.clear()
@@ -1729,9 +1744,18 @@ class UltraBotGUI:
                     "OS Voting is enabled but fewer than 2 valid OS entries are configured.\n"
                     "Go to the OS Voting tab and fix the configuration, or disable voting.")
                 return
-            VM_NAME = valid_entries[0]["vm"]
-            current_os_vm = VM_NAME
-            self._log(f"[OSVoting] Voting enabled — starting with '{valid_entries[0]['name']}'.")
+            # Use the last active VM if it is still in the list, otherwise fall back to the first entry
+            valid_vms = [e["vm"] for e in valid_entries]
+            if current_os_vm and current_os_vm in valid_vms:
+                start_vm_name = current_os_vm
+                start_name = next(e["name"] for e in valid_entries if e["vm"] == current_os_vm)
+                self._log(f"[OSVoting] Resuming with last active OS: '{start_name}'.")
+            else:
+                start_vm_name = valid_entries[0]["vm"]
+                start_name    = valid_entries[0]["name"]
+                self._log(f"[OSVoting] No saved OS found — starting with first entry: '{start_name}'.")
+            VM_NAME = start_vm_name
+            current_os_vm = start_vm_name
         else:
             if not vm:
                 messagebox.showerror("Missing Input", "Please select a VirtualBox VM.")
