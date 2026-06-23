@@ -2,31 +2,243 @@ import subprocess
 import time
 import signal as _signal_module
 import threading as _threading_module
+import tkinter as tk
+import tkinter.font as tkfont
+import os
+import sys
 
-# ── pytchat fix: signal.signal() only works on main thread.
-# When the bot runs in a worker thread, patch it to be a no-op. ──
+# ========================= SPLASH SCREEN =========================
+# Show the splash immediately — before any heavy imports — so the user
+# sees something within milliseconds of launching the script.
+
+_splash_root   = None
+_splash_bar    = None
+_splash_label  = None
+_splash_pct    = None
+_host_root     = None   # the one-and-only tk.Tk() instance (kept hidden during splash)
+
+def _create_splash():
+    global _splash_root, _splash_bar, _splash_label, _splash_pct, _host_root
+
+    # Create the single tk.Tk() host window and keep it hidden.
+    # All ttk styles will be registered on this interpreter.
+    _host_root = tk.Tk()
+    _host_root.withdraw()
+
+    W, H = 480, 220
+    # Splash is a Toplevel so it shares the same Tk interpreter
+    splash = tk.Toplevel(_host_root)
+    splash.title("")
+    splash.resizable(False, False)
+    splash.overrideredirect(True)          # borderless window
+    sw = splash.winfo_screenwidth()
+    sh = splash.winfo_screenheight()
+    x  = (sw - W) // 2
+    y  = (sh - H) // 2
+    splash.geometry(f"{W}x{H}+{x}+{y}")
+    splash.configure(bg="#0f0f1a")
+
+    # Border frame
+    border = tk.Frame(splash, bg="#7c5cbf", padx=2, pady=2)
+    border.place(relx=0, rely=0, relwidth=1, relheight=1)
+    inner = tk.Frame(border, bg="#0f0f1a")
+    inner.pack(fill="both", expand=True)
+
+    # "Script by Nexovative"
+    tk.Label(inner, text="Script by Nexovative",
+             bg="#0f0f1a", fg="#f0c060",
+             font=("Segoe UI", 11, "bold")).pack(pady=(22, 0))
+
+    # App title
+    tk.Label(inner, text="VirtualBox Chat Bot",
+             bg="#0f0f1a", fg="#ffffff",
+             font=("Segoe UI", 18, "bold")).pack(pady=(4, 0))
+
+    # Status label
+    _splash_label = tk.Label(inner, text="Loading GUI...",
+                              bg="#0f0f1a", fg="#aaaaaa",
+                              font=("Segoe UI", 9))
+    _splash_label.pack(pady=(14, 4))
+
+    # Progress bar container
+    bar_bg = tk.Frame(inner, bg="#1e1e2e", height=18, width=380)
+    bar_bg.pack(pady=(0, 8))
+    bar_bg.pack_propagate(False)
+
+    _splash_bar = tk.Frame(bar_bg, bg="#3ddc97", width=0, height=18)
+    _splash_bar.place(x=0, y=0, relheight=1)
+
+    _splash_pct = tk.Label(inner, text="0%",
+                            bg="#0f0f1a", fg="#3ddc97",
+                            font=("Segoe UI", 8))
+    _splash_pct.pack()
+
+    _splash_root = splash
+    splash.lift()
+    splash.attributes("-topmost", True)
+    splash.update()
+
+def _update_splash(pct, label=None):
+    """Update progress bar (0-100) and optional status text (call from main thread)."""
+    if _splash_root is None:
+        return
+    try:
+        bar_width = int(380 * pct / 100)
+        _splash_bar.place(x=0, y=0, relheight=1, width=bar_width)
+        _splash_pct.configure(text=f"{pct}%")
+        if label:
+            _splash_label.configure(text=label)
+        _splash_root.update()
+    except Exception:
+        pass
+
+def _close_splash():
+    global _splash_root
+    if _splash_root:
+        try:
+            _splash_root.destroy()   # destroy only the Toplevel splash
+        except Exception:
+            pass
+        _splash_root = None
+    # _host_root stays alive — it becomes the main window
+
+# ── Show splash immediately ──
+_create_splash()
+_update_splash(5, "Loading GUI...")
+
+# ========================= HEAVY IMPORTS =========================
+# These run AFTER the splash is visible.
+
+_update_splash(10, "Importing signal patcher...")
+
+# pytchat fix: signal.signal() only works on main thread.
+# When the bot runs in a worker thread, patch it to be a no-op.
 _orig_signal = _signal_module.signal
 def _safe_signal(sig, handler):
     if _threading_module.current_thread() is _threading_module.main_thread():
         return _orig_signal(sig, handler)
 _signal_module.signal = _safe_signal
 
+_update_splash(20, "Importing pytchat...")
 import pytchat
+
+_update_splash(35, "Importing VirtualBox API...")
 from vboxapi import VirtualBoxManager
-import os
+
+_update_splash(50, "Importing system libraries...")
 import threading
-import sys
 import re
 import win32com.client
 import http.server
 import socketserver
 import json
-import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
+
+_update_splash(65, "Importing tray & notification libraries...")
+
+# ── System tray & toast notifications ──
+try:
+    from plyer import notification as _plyer_notification
+    _PLYER_OK = True
+except ImportError:
+    _PLYER_OK = False
+    print("[Notify] plyer not installed — toast notifications disabled. Run: pip install plyer")
+
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+    _PYSTRAY_OK = True
+except ImportError:
+    _PYSTRAY_OK = False
+    print("[Tray] pystray/Pillow not installed — system tray disabled. Run: pip install pystray pillow")
+
+_update_splash(80, "Initializing VirtualBox manager...")
+
 
 # ========================= CUSTOM COMMANDS =========================
 CUSTOM_COMMANDS_FILE = "custom_commands.json"
 custom_commands = {}  # {"!bubbles": [{"action": "combo", "args": "win+r"}, ...]}
+
+# ========================= NOTIFICATIONS & TRAY =========================
+_tray_icon   = None   # pystray.Icon instance
+_tray_thread = None
+_gui_root    = None   # set by GUI after root is created
+
+def notify(title, message, timeout=4):
+    """Send a Windows toast notification (non-blocking)."""
+    def _send():
+        if _PLYER_OK:
+            try:
+                _plyer_notification.notify(
+                    title=title,
+                    message=message,
+                    app_name="VirtualBox Chat Bot",
+                    timeout=timeout,
+                )
+            except Exception as e:
+                print(f"[Notify] Error: {e}")
+        else:
+            print(f"[Notify] {title}: {message}")
+    threading.Thread(target=_send, daemon=True).start()
+
+def _make_tray_image():
+    """Generate a simple purple icon for the system tray."""
+    size = 64
+    img  = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse([4, 4, size - 4, size - 4], fill=(124, 92, 191, 255))
+    draw.rectangle([28, 18, 36, 42], fill="white")
+    draw.rectangle([28, 46, 36, 54], fill="white")
+    return img
+
+def _show_gui_from_tray(icon, item):
+    """Called from tray menu — restore the GUI window."""
+    if _gui_root:
+        _gui_root.after(0, _gui_root.deiconify)
+        _gui_root.after(0, _gui_root.lift)
+
+def _exit_from_tray(icon, item):
+    """Called from tray menu — stop bot and kill the entire process."""
+    bot_stop_event.set()
+    icon.stop()
+    if _gui_root:
+        _gui_root.after(0, _gui_root.destroy)
+    # Give destroy a moment then hard-exit so nothing lingers
+    def _hard_exit():
+        time.sleep(0.5)
+        os._exit(0)
+    threading.Thread(target=_hard_exit, daemon=True).start()
+
+def start_tray_icon():
+    """Start the system tray icon in a background thread."""
+    global _tray_icon, _tray_thread
+    if not _PYSTRAY_OK:
+        return
+    if _tray_icon is not None:
+        return  # already running
+    menu = pystray.Menu(
+        pystray.MenuItem("Show GUI",        _show_gui_from_tray, default=True),
+        pystray.MenuItem("Exit",            _exit_from_tray),
+    )
+    _tray_icon = pystray.Icon(
+        name  = "VBoxChatBot",
+        icon  = _make_tray_image(),
+        title = "VirtualBox Chat Bot",
+        menu  = menu,
+    )
+    _tray_thread = threading.Thread(target=_tray_icon.run, daemon=True)
+    _tray_thread.start()
+    print("[Tray] System tray icon started.")
+
+def stop_tray_icon():
+    """Remove the tray icon."""
+    global _tray_icon
+    if _tray_icon:
+        try:
+            _tray_icon.stop()
+        except Exception:
+            pass
+        _tray_icon = None
 
 def load_custom_commands():
     global custom_commands
@@ -279,11 +491,107 @@ YOUTUBE_API_KEY    = ""   # Optional: paste your YouTube Data API v3 key here fo
 VIDEO_ID = ""
 VM_NAME  = ""
 
+_update_splash(85, "Connecting to VirtualBox...")
 mgr  = VirtualBoxManager(None, None)
 vbox = mgr.getVirtualBox()
+_update_splash(92, "Loading configuration...")
 
 active_users = set()
 bot_stop_event = threading.Event()   # set this to actually stop the bot + its background threads
+TEST_MODE_ENABLED = False            # when True, bot reads commands from console instead of YouTube chat
+
+def run_test_mode():
+    """
+    Test mode: read commands from stdin and execute them exactly as if
+    they came from a chat message, without needing a YouTube connection.
+    Type  !quit  or  !exit  to stop test mode.
+    Supports all bot commands: !type, !send, !click, !combo, !key, etc.
+    Also supports OS-voting triggers if OS Voting is enabled.
+    """
+    print("[TestMode] Started. Type commands (e.g. '!type hello', '!click', '!win7'). Type '!quit' to stop.")
+    print("[TestMode] All normal bot commands are supported.")
+    while not bot_stop_event.is_set():
+        try:
+            line = input("[TestMode] > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if not line:
+            continue
+        if line.lower() in ("!quit", "!exit", "!stop"):
+            print("[TestMode] Stopping test mode.")
+            bot_stop_event.set()
+            break
+
+        # Parse exactly like the chat loop does
+        if not line.startswith("!"):
+            print("[TestMode] Commands must start with '!' — e.g. !type hello")
+            continue
+
+        parts = line[1:].split(" ", 1)
+        cmd   = parts[0].lower().strip()
+        args  = parts[1].strip() if len(parts) > 1 else ""
+
+        # OS voting triggers
+        if OS_VOTING_ENABLED:
+            os_trigger_map = get_os_trigger_map()
+            if cmd in os_trigger_map:
+                target_entry = os_trigger_map[cmd]
+                print(f"[TestMode] Owner-bypass OS switch → {target_entry['name']}")
+                threading.Thread(target=switch_os, args=(target_entry,), daemon=True).start()
+                continue
+
+        # Custom commands
+        trigger = "!" + cmd
+        if trigger in custom_commands:
+            threading.Thread(target=execute_custom_command, args=(trigger,), daemon=True).start()
+            continue
+
+        # Built-in commands
+        try:
+            if cmd in ("type", "text", "say"):
+                send_keyboard(args)
+            elif cmd in ("send", "sendenter", "typeenter", "sendline"):
+                send_keyboard(args)
+                time.sleep(0.05)
+                send_special_enter()
+            elif cmd == "enter":
+                send_special_enter()
+            elif cmd in ("key", "press"):
+                k = args.lower().strip()
+                if k in SCANCODES:
+                    send_scancode(SCANCODES[k][0])
+                    time.sleep(0.01)
+                    send_scancode(SCANCODES[k][1])
+                else:
+                    send_keyboard(k)
+            elif cmd in ("combo", "chord", "multi"):
+                keys = args.lower().replace("+", " ").split()
+                if keys:
+                    send_combo(keys)
+            elif cmd in ("click", "lclick", "rclick", "rightclick",
+                         "mclick", "middleclick", "move", "mouse", "mv",
+                         "abs", "cursor", "moveabs", "drag", "dragrel",
+                         "dragabs", "drag_absolute", "scroll", "wheel"):
+                handle_mouse(cmd, args)
+            elif cmd in ("startvm", "launchvm"):
+                start_vm()
+            elif cmd in ("restore", "focus", "front"):
+                restore_window()
+            elif cmd == "run":
+                send_combo(["win", "r"])
+            elif cmd in ("wait", "pause", "delay"):
+                try:
+                    delay = max(0, min(float(args), 5.0))
+                    time.sleep(delay)
+                except ValueError:
+                    pass
+            else:
+                print(f"[TestMode] Unknown command: !{cmd}")
+                continue
+            print(f"[TestMode] OK: !{cmd} {args}")
+        except Exception as e:
+            print(f"[TestMode] Error executing !{cmd}: {e}")
+    print("[TestMode] Stopped.")
 vote_restart = {}
 vote_revert  = {}
 banned_users = {}
@@ -324,14 +632,15 @@ OS_VOTING_CONFIG_FILE = "os_voting_config.json"
 OS_VOTE_STATUS_FILE   = "os_vote_status.html"
 OS_VOTE_REQUIRED      = 3
 OS_VOTE_TIMEOUT       = 120
-OS_VOTE_SLOTS         = 5
+OS_VOTE_SLOTS         = 15
 
 OS_VOTING_ENABLED = False
-OS_LIST = []   # list of dicts: {"name": str, "trigger": str, "vm": str}  (max 5 entries)
+OS_LIST = []   # list of dicts: {"name": str, "trigger": str, "vm": str}  (max 15 entries)
 
 os_votes            = {}   # {trigger: set(usernames)}
 os_vote_start_time  = None
 os_switch_in_progress = False
+os_switch_lock = threading.Lock()   # prevents concurrent switch_os calls
 current_os_vm = None     # currently running OS's VM name (used as active VM_NAME target)
 
 def load_os_voting_config():
@@ -387,28 +696,113 @@ def get_os_trigger_map():
 def update_os_vote_status():
     """Writes the current OS voting tally to OS_VOTE_STATUS_FILE for the stream overlay."""
     trigger_map = get_os_trigger_map()
-    rows = ""
-    for trig, entry in trigger_map.items():
-        count = len(os_votes.get(trig, set()))
-        rows += (f"<div class='os-row'><span class='os-name'>{entry['name']} "
-                  f"(!{trig})</span><span class='os-count'>{count}/{OS_VOTE_REQUIRED}</span></div>")
     active_name = "—"
     for entry in OS_LIST:
         if entry.get("vm") == current_os_vm:
             active_name = entry.get("name", "—")
             break
-    html = f"""<html><head><style>
-    body{{background:rgba(0,0,0,0);color:white;font-family:Arial;text-align:center;font-size:22px;text-shadow:2px 2px 4px #000;}}
-    #c{{margin-top:20px;padding:16px;background:rgba(0,0,0,0.5);border-radius:12px;display:inline-block;min-width:260px;}}
-    h1{{color:#7c5cbf;font-size:24px;margin:0 0 10px 0;}}
-    .os-row{{display:flex;justify-content:space-between;gap:18px;padding:4px 0;font-size:18px;}}
-    .active{{color:#3ddc97;}}
-    </style></head><body><div id="c">
-    <h1>OS Vote</h1>
-    <p class="active">Currently running: {active_name}</p>
-    {rows if rows else "<p>No OS options configured.</p>"}
+
+    rows = ""
+    for trig, entry in trigger_map.items():
+        count   = len(os_votes.get(trig, set()))
+        pct     = min(100, int(count / OS_VOTE_REQUIRED * 100))
+        is_cur  = (entry.get("vm") == current_os_vm)
+        bar_col = "#3ddc97" if is_cur else "#7c5cbf"
+        name_style = "color:#3ddc97;font-weight:bold;" if is_cur else ""
+        rows += f"""
+        <div class="row">
+          <div class="label" style="{name_style}">{entry['name']}
+            <span class="trigger">!{trig}</span>
+          </div>
+          <div class="bar-wrap">
+            <div class="bar" style="width:{pct}%;background:{bar_col};"></div>
+          </div>
+          <div class="count" style="color:{bar_col};">{count}<span class="sep">/</span>{OS_VOTE_REQUIRED}</div>
+        </div>"""
+
+    html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+    *{{box-sizing:border-box;margin:0;padding:0;}}
+    body{{
+      background:transparent;
+      font-family:'Segoe UI',Arial,sans-serif;
+      color:white;
+      text-shadow:1px 1px 3px rgba(0,0,0,0.9);
+      padding:12px;
+    }}
+    #panel{{
+      background:rgba(10,10,20,0.82);
+      border:1px solid rgba(124,92,191,0.5);
+      border-radius:16px;
+      padding:18px 22px 14px;
+      min-width:340px;
+      max-width:420px;
+      backdrop-filter:blur(6px);
+    }}
+    #title{{
+      font-size:22px;
+      font-weight:700;
+      color:#b39ddb;
+      letter-spacing:1px;
+      text-align:center;
+      margin-bottom:4px;
+    }}
+    #current{{
+      font-size:13px;
+      color:#3ddc97;
+      text-align:center;
+      margin-bottom:14px;
+      opacity:0.9;
+    }}
+    .row{{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      margin-bottom:9px;
+    }}
+    .label{{
+      font-size:15px;
+      font-weight:600;
+      min-width:120px;
+      flex-shrink:0;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }}
+    .trigger{{
+      font-size:11px;
+      color:#aaa;
+      font-weight:400;
+      margin-left:5px;
+    }}
+    .bar-wrap{{
+      flex:1;
+      background:rgba(255,255,255,0.1);
+      border-radius:8px;
+      height:16px;
+      overflow:hidden;
+    }}
+    .bar{{
+      height:100%;
+      border-radius:8px;
+      transition:width 0.4s ease;
+      min-width:4px;
+    }}
+    .count{{
+      font-size:16px;
+      font-weight:700;
+      min-width:36px;
+      text-align:right;
+    }}
+    .sep{{color:rgba(255,255,255,0.3);font-weight:300;margin:0 1px;}}
+    #empty{{color:#888;font-size:13px;text-align:center;padding:8px 0;}}
+    </style></head><body>
+    <div id="panel">
+      <div id="title">&#128229; OS Vote</div>
+      <div id="current">Now running: <strong>{active_name}</strong></div>
+      {rows if rows else '<div id="empty">No OS options configured.</div>'}
     </div>
-    <script>setInterval(()=>location.reload(),10000);</script></body></html>"""
+    <script>setInterval(()=>location.reload(),8000);</script>
+    </body></html>"""
     try:
         with open(OS_VOTE_STATUS_FILE, "w", encoding="utf-8") as f:
             f.write(html)
@@ -418,6 +812,9 @@ def update_os_vote_status():
 def switch_os(target_entry, announce=True):
     """Powers off the current OS VM (if different) and boots the target OS VM."""
     global current_os_vm, VM_NAME, os_switch_in_progress, os_votes, os_vote_start_time
+    if not os_switch_lock.acquire(blocking=False):
+        print("[OSVoting] Switch already in progress, ignoring duplicate request.")
+        return
     os_switch_in_progress = True
     try:
         target_name = target_entry.get("name", "Unknown OS")
@@ -442,6 +839,7 @@ def switch_os(target_entry, announce=True):
         VM_NAME = target_vm
         update_status(f"Running {target_name}")
         play_success_sound()
+        notify("OS Switched", f"Now running: {target_name}")
         save_os_voting_config()   # persist last active VM so bot remembers it on next launch
         print(f"[OSVoting] Switched to '{target_name}' ({target_vm})")
     finally:
@@ -449,6 +847,7 @@ def switch_os(target_entry, announce=True):
         os_vote_start_time = None
         update_os_vote_status()
         os_switch_in_progress = False
+        os_switch_lock.release()
 
 def os_vote_timeout_checker():
     """Background thread: clears stale OS votes after OS_VOTE_TIMEOUT seconds of inactivity."""
@@ -482,11 +881,13 @@ Commands (! prefix)
 """
 
 def speak_text(text):
-    try:
-        speaker = win32com.client.Dispatch("SAPI.SpVoice")
-        speaker.Speak(text)
-    except Exception as e:
-        print(f"[Speech] Error: {e}")
+    def _speak():
+        try:
+            speaker = win32com.client.Dispatch("SAPI.SpVoice")
+            speaker.Speak(text)
+        except Exception as e:
+            print(f"[Speech] Error: {e}")
+    threading.Thread(target=_speak, daemon=True).start()
 
 def send_keyboard(text):
     try:
@@ -541,10 +942,12 @@ def get_mouse_and_session():
     return mouse, session
 
 def unlock_session(session):
-    if session.state == 1:
-        session.unlockMachine(0)
+    # VirtualBox session states: 0=Null, 1=Unlocked, 2=Locked, 3=Spawning, 4=Unlocking
+    if session.state == 2:   # 2 = Locked — only unlock when actually locked
+        session.unlockMachine()
 
 def handle_mouse(cmd, args):
+    session = None
     try:
         mouse, session = get_mouse_and_session()
         parts   = args.split()
@@ -568,10 +971,12 @@ def handle_mouse(cmd, args):
             count = int(args) if args.isdigit() else 1
             for _ in range(count):
                 mouse.putMouseEvent(0,0,0,0,2)
+                mouse.putMouseEvent(0,0,0,0,0)   # release right button
         elif cmd in ['mclick', 'middleclick']:
             count = int(args) if args.isdigit() else 1
             for _ in range(count):
                 mouse.putMouseEvent(0,0,0,0,4)
+                mouse.putMouseEvent(0,0,0,0,0)   # release middle button
         elif cmd in ['drag', 'dragrel']:
             if len(parts) >= 2:
                 button = 1 if len(parts)==2 else (1 if parts[0]=='left' else 2 if parts[0]=='right' else 4)
@@ -588,10 +993,14 @@ def handle_mouse(cmd, args):
         elif cmd in ['scroll', 'wheel']:
             dz = int(args) if args else 0
             mouse.putMouseEvent(0,0,dz,0,0)
-        unlock_session(session)
         print(f"[Mouse] {cmd} {args}")
     except Exception as e:
         print(f"[Mouse] Error: {e}")
+    finally:
+        # Always release the session — even if the command raised an exception.
+        # Skipping this locks the VirtualBox machine permanently until process restart.
+        if session is not None:
+            unlock_session(session)
 
 def update_ban_vote_display(target, current_votes, required, remaining_time=None):
     action_text   = f"Ban @{target}" if target else "Empty"
@@ -673,6 +1082,7 @@ def watchdog_restart():
                         print(f"[Watchdog] VM down ({vm_state}). Auto-restarting...")
                         update_status("Auto-starting...")
                         speak_text("Auto starting virtual machine...")
+                        notify("VM Auto-Restarted", f"VM was found {vm_state}. Auto-restart triggered.")
                         subprocess.run([VBOXMANAGE_PATH, 'startvm', VM_NAME], check=True)
                         update_status("Running")
                         speak_text("Running")
@@ -695,9 +1105,17 @@ class YouTubeChatBot:
         print("[Bot] Connected to YouTube chat!")
         print(COMMANDS_HELP)
         self.last_start_time = 0
-        threading.Thread(target=vote_timeout_checker, daemon=True).start()
-        threading.Thread(target=watchdog_restart, daemon=True).start()
-        threading.Thread(target=os_vote_timeout_checker, daemon=True).start()
+        # Use names to avoid duplicate threads on bot restart.
+        running_names = {t.name for t in threading.enumerate()}
+        if "vote_timeout_checker" not in running_names:
+            threading.Thread(target=vote_timeout_checker, daemon=True,
+                             name="vote_timeout_checker").start()
+        if "watchdog_restart" not in running_names:
+            threading.Thread(target=watchdog_restart, daemon=True,
+                             name="watchdog_restart").start()
+        if "os_vote_timeout_checker" not in running_names:
+            threading.Thread(target=os_vote_timeout_checker, daemon=True,
+                             name="os_vote_timeout_checker").start()
         if OS_VOTING_ENABLED:
             update_os_vote_status()
        # threading.Thread(target=fetch_youtube_stats, daemon=True).start()
@@ -871,11 +1289,18 @@ class YouTubeChatBot:
                                     restart_in_progress = True
                                     update_status("Restarting...")
                                     update_votes_json("restartvm", required_votes, required_votes, 0)
-                                    subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'reset'], check=True)
-                                    restart_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
-                                    update_status("Running"); play_success_sound()
-                                    update_votes_json("restartvm", 0, required_votes, 0)
-                                    restart_in_progress = False
+                                    try:
+                                        subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'reset'], check=True)
+                                        restart_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
+                                        update_status("Running"); play_success_sound()
+                                        notify("VM Restarted", "Restart triggered by owner.")
+                                    except Exception as e:
+                                        print(f"[Vote] Restart error: {e}")
+                                        update_status("Restart failed")
+                                        notify("Restart Failed", str(e), timeout=6)
+                                    finally:
+                                        update_votes_json("restartvm", 0, required_votes, 0)
+                                        restart_in_progress = False
                                     continue
                                 if not vote_restart: restart_start_time = current_time
                                 if user in vote_restart: continue
@@ -889,11 +1314,18 @@ class YouTubeChatBot:
                                     vote_restart.clear(); restart_start_time=None; active_users.clear()
                                     restart_in_progress = True
                                     update_status("Restarting...")
-                                    subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'reset'], check=True)
-                                    restart_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
-                                    update_status("Running"); play_success_sound()
-                                    update_votes_json("restartvm", 0, required_votes, 0)
-                                    restart_in_progress = False
+                                    try:
+                                        subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'reset'], check=True)
+                                        restart_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
+                                        update_status("Running"); play_success_sound()
+                                        notify("VM Restarted", "Restart vote passed by chat.")
+                                    except Exception as e:
+                                        print(f"[Vote] Restart error: {e}")
+                                        update_status("Restart failed")
+                                        notify("Restart Failed", str(e), timeout=6)
+                                    finally:
+                                        update_votes_json("restartvm", 0, required_votes, 0)
+                                        restart_in_progress = False
 
                             elif cmd == 'revert':
                                 if revert_in_progress: continue
@@ -909,15 +1341,22 @@ class YouTubeChatBot:
                                     revert_in_progress = True
                                     update_status("Reverting...")
                                     update_votes_json("revert", required_votes, required_votes, 0)
-                                    subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'poweroff'], check=True)
-                                    time.sleep(3)
-                                    subprocess.run([VBOXMANAGE_PATH,'snapshot',VM_NAME,'restorecurrent'], check=True)
-                                    time.sleep(3)
-                                    subprocess.run([VBOXMANAGE_PATH,'startvm',VM_NAME], check=True)
-                                    revert_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
-                                    update_status("Running"); play_success_sound()
-                                    update_votes_json("revert", 0, required_votes, 0)
-                                    revert_in_progress = False
+                                    try:
+                                        subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'poweroff'], check=True)
+                                        time.sleep(3)
+                                        subprocess.run([VBOXMANAGE_PATH,'snapshot',VM_NAME,'restorecurrent'], check=True)
+                                        time.sleep(3)
+                                        subprocess.run([VBOXMANAGE_PATH,'startvm',VM_NAME], check=True)
+                                        revert_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
+                                        update_status("Running"); play_success_sound()
+                                        notify("VM Reverted", "Snapshot restored by owner.")
+                                    except Exception as e:
+                                        print(f"[Vote] Revert error: {e}")
+                                        update_status("Revert failed")
+                                        notify("Revert Failed", str(e), timeout=6)
+                                    finally:
+                                        update_votes_json("revert", 0, required_votes, 0)
+                                        revert_in_progress = False
                                     continue
                                 if not vote_revert: revert_start_time = current_time
                                 if user in vote_revert: continue
@@ -931,15 +1370,22 @@ class YouTubeChatBot:
                                     vote_revert.clear(); revert_start_time=None; active_users.clear()
                                     revert_in_progress = True
                                     update_status("Reverting...")
-                                    subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'poweroff'], check=True)
-                                    time.sleep(3)
-                                    subprocess.run([VBOXMANAGE_PATH,'snapshot',VM_NAME,'restorecurrent'], check=True)
-                                    time.sleep(3)
-                                    subprocess.run([VBOXMANAGE_PATH,'startvm',VM_NAME], check=True)
-                                    revert_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
-                                    update_status("Running"); play_success_sound()
-                                    update_votes_json("revert", 0, required_votes, 0)
-                                    revert_in_progress = False
+                                    try:
+                                        subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'poweroff'], check=True)
+                                        time.sleep(3)
+                                        subprocess.run([VBOXMANAGE_PATH,'snapshot',VM_NAME,'restorecurrent'], check=True)
+                                        time.sleep(3)
+                                        subprocess.run([VBOXMANAGE_PATH,'startvm',VM_NAME], check=True)
+                                        revert_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
+                                        update_status("Running"); play_success_sound()
+                                        notify("VM Reverted", "Snapshot restored by chat vote.")
+                                    except Exception as e:
+                                        print(f"[Vote] Revert error: {e}")
+                                        update_status("Revert failed")
+                                        notify("Revert Failed", str(e), timeout=6)
+                                    finally:
+                                        update_votes_json("revert", 0, required_votes, 0)
+                                        revert_in_progress = False
 
                             elif cmd == 'ban':
                                 if not args.startswith('@'): continue
@@ -959,6 +1405,7 @@ class YouTubeChatBot:
                                     update_status(f"@{target_raw} banned 30 min!")
                                     speak_text(f"Banned {target_raw} for 30 minutes.")
                                     play_success_sound()
+                                    notify("User Banned", f"@{target_raw} banned for 30 minutes by chat vote.")
                                     del ban_votes[target]
                                     update_ban_vote_display(None, 0, 3)
 
@@ -993,13 +1440,21 @@ class ConsoleRedirect:
 
     def write(self, msg):
         self._orig_stdout.write(msg)
+        # Tkinter is not thread-safe; schedule the widget update on the main thread.
         try:
-            self.widget.configure(state='normal')
             ts = time.strftime("%H:%M:%S")
-            self.widget.insert('end', f"[{ts}] {msg}")
-            self.widget.see('end')
-            self.widget.configure(state='disabled')
-        except: pass
+            formatted = f"[{ts}] {msg}"
+            def _update(m=formatted):
+                try:
+                    self.widget.configure(state='normal')
+                    self.widget.insert('end', m)
+                    self.widget.see('end')
+                    self.widget.configure(state='disabled')
+                except Exception:
+                    pass
+            self.widget.after(0, _update)
+        except Exception:
+            pass
 
     def flush(self): pass
 
@@ -1186,6 +1641,49 @@ class UltraBotGUI:
                    command=self._start_bot).pack(side="left", padx=(0,8))
         ttk.Button(btn_frame, text="⏹  Stop Bot", style="Red.TButton",
                    command=self._stop_bot).pack(side="left")
+        ttk.Button(btn_frame, text="📌  Minimize to Tray", style="Dim.TButton",
+                   command=self._minimize_to_tray).pack(side="left", padx=(8, 0))
+
+        # Test Mode
+        test_frame = tk.Frame(parent, bg=self.BG2, padx=12, pady=8)
+        test_frame.pack(fill="x", padx=12, pady=(0, 4))
+        self._test_mode_var = tk.BooleanVar(value=False)
+        self._test_mode_btn = tk.Checkbutton(
+            test_frame,
+            text="🧪  Test Mode  (control VM from console — no YouTube connection needed)",
+            variable=self._test_mode_var,
+            bg=self.BG2, fg=self.YELLOW,
+            selectcolor=self.BG3,
+            activebackground=self.BG2,
+            activeforeground=self.YELLOW,
+            font=("Segoe UI", 9, "bold"),
+            command=self._on_test_mode_toggle,
+        )
+        self._test_mode_btn.pack(anchor="w")
+        self._test_mode_note = tk.Label(
+            test_frame,
+            text="When enabled: select a VM, then type commands in the console window (e.g. !type hello  !click  !combo win+r)",
+            bg=self.BG2, fg=self.TEXTDIM,
+            font=("Segoe UI", 8),
+            wraplength=740, justify="left",
+        )
+        self._test_mode_note.pack(anchor="w", pady=(2, 0))
+
+        # Admin command bar packed with side='bottom' BEFORE the console,
+        # so it stays visible. If packed after a widget with expand=True,
+        # the console would consume all space and push the bar off-screen.
+        admin_frame = tk.Frame(parent, bg=self.BG2, pady=6)
+        admin_frame.pack(fill="x", padx=12, pady=(0,4), side="bottom")
+        tk.Label(admin_frame, text="Admin CMD:",
+                 bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI",9,"bold")).pack(side="left", padx=(8,6))
+        self._admin_var = tk.StringVar()
+        admin_entry = ttk.Entry(admin_frame, textvariable=self._admin_var,
+                                width=36, font=("Segoe UI Mono",10))
+        admin_entry.pack(side="left", padx=(0,8), ipady=4)
+        admin_entry.bind("<Return>", lambda e: self._send_admin_cmd())
+        ttk.Button(admin_frame, text="Send ↵", style="Accent.TButton",
+                   command=self._send_admin_cmd).pack(side="left")
 
         # Console label
         tk.Label(parent, text="Console Output",
@@ -1193,9 +1691,10 @@ class UltraBotGUI:
                  font=("Segoe UI",9,"bold")).pack(
                  anchor="w", padx=16, pady=(4,0))
 
-        # Console
+        # Console packed last: expand=True fills remaining space between
+        # the fixed widgets above and the admin bar anchored at the bottom.
         console_frame = tk.Frame(parent, bg=self.BORDER, bd=1)
-        console_frame.pack(fill="both", expand=True, padx=12, pady=(2,6))
+        console_frame.pack(fill="both", expand=True, padx=12, pady=(2,0))
         self._console = scrolledtext.ScrolledText(
             console_frame,
             bg=self.CONSOLE, fg=self.CONTEXT,
@@ -1207,20 +1706,6 @@ class UltraBotGUI:
             wrap='word'
         )
         self._console.pack(fill="both", expand=True, padx=1, pady=1)
-
-        # Admin command bar
-        admin_frame = tk.Frame(parent, bg=self.BG2, pady=6)
-        admin_frame.pack(fill="x", padx=12, pady=(0,8))
-        tk.Label(admin_frame, text="Admin CMD:",
-                 bg=self.BG2, fg=self.TEXTDIM,
-                 font=("Segoe UI",9,"bold")).pack(side="left", padx=(8,6))
-        self._admin_var = tk.StringVar()
-        admin_entry = ttk.Entry(admin_frame, textvariable=self._admin_var,
-                                width=36, font=("Segoe UI Mono",10))
-        admin_entry.pack(side="left", padx=(0,8), ipady=4)
-        admin_entry.bind("<Return>", lambda e: self._send_admin_cmd())
-        ttk.Button(admin_frame, text="Send ↵", style="Accent.TButton",
-                   command=self._send_admin_cmd).pack(side="left")
 
         # Initial VM list load
         self._refresh_vm_list()
@@ -1458,7 +1943,8 @@ class UltraBotGUI:
         tk.Label(header,
                  text=(f"Viewers vote with chat commands (e.g. !win7, !win8). "
                        f"{OS_VOTE_REQUIRED} votes switch the running OS. "
-                       f"The channel owner bypasses voting and switches instantly."),
+                       f"The channel owner bypasses voting and switches instantly. "
+                       f"Up to {OS_VOTE_SLOTS} OS entries can be configured."),
                  bg=self.BG, fg=self.TEXTDIM, font=("Segoe UI", 9),
                  wraplength=760, justify="left").pack(anchor="w", pady=(2, 0))
 
@@ -1478,9 +1964,10 @@ class UltraBotGUI:
         self._os_rows_card = ttk.Frame(parent, style="Card.TFrame", padding=14)
         self._os_rows_card.pack(fill="both", expand=True, padx=16, pady=(0, 8))
 
+        # Sticky column header (outside the scroll area so it doesn't scroll away)
         col_hdr = tk.Frame(self._os_rows_card, bg=self.BG2)
-        col_hdr.pack(fill="x", pady=(0, 6))
-        tk.Label(col_hdr, text="#", bg=self.BG2, fg=self.TEXTDIM,
+        col_hdr.pack(fill="x", pady=(0, 4))
+        tk.Label(col_hdr, text="#",            bg=self.BG2, fg=self.TEXTDIM,
                  font=("Segoe UI", 9, "bold"), width=2).grid(row=0, column=0, padx=4)
         tk.Label(col_hdr, text="Display Name", bg=self.BG2, fg=self.TEXTDIM,
                  font=("Segoe UI", 9, "bold"), width=18, anchor="w").grid(row=0, column=1, padx=4)
@@ -1488,6 +1975,32 @@ class UltraBotGUI:
                  font=("Segoe UI", 9, "bold"), width=14, anchor="w").grid(row=0, column=2, padx=4)
         tk.Label(col_hdr, text="VirtualBox VM", bg=self.BG2, fg=self.TEXTDIM,
                  font=("Segoe UI", 9, "bold"), width=24, anchor="w").grid(row=0, column=3, padx=4)
+
+        # Canvas + scrollbar for the rows
+        scroll_container = tk.Frame(self._os_rows_card, bg=self.BG2)
+        scroll_container.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(scroll_container, bg=self.BG2, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(scroll_container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        # Inner frame that holds all the rows
+        inner = tk.Frame(canvas, bg=self.BG2)
+        inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        def _on_canvas_configure(event):
+            canvas.itemconfig(inner_id, width=event.width)
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        inner.bind("<Configure>", _on_inner_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        inner.bind("<MouseWheel>", _on_mousewheel)
 
         self._os_name_vars    = []
         self._os_trigger_vars = []
@@ -1497,8 +2010,9 @@ class UltraBotGUI:
         existing = OS_LIST + [{}] * (OS_VOTE_SLOTS - len(OS_LIST))
         for i in range(OS_VOTE_SLOTS):
             entry = existing[i] if i < len(existing) else {}
-            row = tk.Frame(self._os_rows_card, bg=self.BG2)
+            row = tk.Frame(inner, bg=self.BG2)
             row.pack(fill="x", pady=3)
+            row.bind("<MouseWheel>", _on_mousewheel)
 
             tk.Label(row, text=str(i + 1), bg=self.BG2, fg=self.TEXTDIM,
                      font=("Segoe UI", 9), width=2).grid(row=0, column=0, padx=4)
@@ -1509,17 +2023,17 @@ class UltraBotGUI:
             self._os_name_vars.append(name_var)
 
             trig_var = tk.StringVar(value=entry.get("trigger", ""))
-            trig_entry = ttk.Entry(row, textvariable=trig_var, width=14,
-                                    font=("Segoe UI Mono", 10))
-            trig_entry.grid(row=0, column=2, padx=4, ipady=3)
+            ttk.Entry(row, textvariable=trig_var, width=14,
+                      font=("Segoe UI Mono", 10)).grid(row=0, column=2, padx=4, ipady=3)
             self._os_trigger_vars.append(trig_var)
-            tk.Label(row, text="(no ! needed, e.g. win7)", bg=self.BG2, fg=self.TEXTDIM,
+            tk.Label(row, text="(no ! needed)", bg=self.BG2, fg=self.TEXTDIM,
                      font=("Segoe UI", 7)).grid(row=1, column=2, sticky="w", padx=4)
 
             vm_var = tk.StringVar(value=entry.get("vm", ""))
             vm_combo = ttk.Combobox(row, textvariable=vm_var, width=24,
                                      state="readonly", font=("Segoe UI", 9))
             vm_combo.grid(row=0, column=3, padx=4, ipady=3)
+            vm_combo.bind("<MouseWheel>", _on_mousewheel)
             self._os_vm_vars.append(vm_var)
             self._os_vm_combos.append(vm_combo)
 
@@ -1726,6 +2240,49 @@ class UltraBotGUI:
             self._log("⚠️ No VMs found (VirtualBox installed?)")
 
     # ──────────────── Bot Start / Stop ────────────────
+    def _on_test_mode_toggle(self):
+        global TEST_MODE_ENABLED, VM_NAME, current_os_vm
+        enabled = self._test_mode_var.get()
+        TEST_MODE_ENABLED = enabled
+
+        if enabled:
+            vm = self._vm_var.get().strip()
+            if not vm and not (OS_VOTING_ENABLED and OS_LIST):
+                messagebox.showerror("Missing VM",
+                    "Please select a VirtualBox VM before enabling Test Mode.")
+                self._test_mode_var.set(False)
+                TEST_MODE_ENABLED = False
+                return
+            if self._bot_running:
+                messagebox.showwarning("Bot Running",
+                    "Stop the bot first before starting Test Mode.")
+                self._test_mode_var.set(False)
+                TEST_MODE_ENABLED = False
+                return
+            # Set VM target
+            if OS_VOTING_ENABLED:
+                valid = [e for e in OS_LIST if e.get("vm")]
+                if valid:
+                    VM_NAME = valid[0]["vm"]
+                    current_os_vm = VM_NAME
+            else:
+                VM_NAME = vm
+                current_os_vm = vm
+            # Start background threads needed for VM control
+            bot_stop_event.clear()
+            threading.Thread(target=watchdog_restart,       daemon=True).start()
+            threading.Thread(target=os_vote_timeout_checker, daemon=True).start()
+            # Start the console input loop in a background thread
+            threading.Thread(target=run_test_mode, daemon=True).start()
+            self._set_status("Test Mode", self.YELLOW)
+            self._log(f"[TestMode] Started. VM: {VM_NAME}. Type commands in the console.")
+            notify("Test Mode Active", f"VM: {VM_NAME}\nType commands in the console window.")
+        else:
+            bot_stop_event.set()
+            self._set_status("Stopped", self.RED)
+            self._log("[TestMode] Stopped.")
+            notify("Test Mode Stopped", "Test mode has been disabled.")
+
     def _start_bot(self):
         global VIDEO_ID, VM_NAME, current_os_vm
         yt  = self._yt_var.get().strip()
@@ -1773,6 +2330,7 @@ class UltraBotGUI:
         self._console_redir.start()
 
         self._log(f"Starting bot → YT: {VIDEO_ID}  |  VM: {VM_NAME}")
+        notify("Bot Started", f"Listening on: {VIDEO_ID}\nVM: {VM_NAME}")
 
         self._bot_instance = None
         self._bot_thread = threading.Thread(target=self._run_bot, daemon=True)
@@ -1788,17 +2346,34 @@ class UltraBotGUI:
                 print("[Bot] Chat connection failed at startup.")
         except Exception as e:
             print(f"[Bot] Fatal error: {e}")
+            notify("Bot Crashed", f"Fatal error: {e}", timeout=8)
         finally:
             self._bot_instance = None
             self._bot_running = False
             self.root.after(0, lambda: self._set_status("Stopped", self.RED))
 
+    def _minimize_to_tray(self):
+        if not _PYSTRAY_OK:
+            messagebox.showinfo("Tray Unavailable",
+                "pystray or Pillow is not installed.\nRun: pip install pystray pillow")
+            return
+        self.root.withdraw()
+        notify("Running in Tray",
+               "Bot is still running. Right-click the tray icon to restore or exit.")
+
     def _stop_bot(self):
-        if not self._bot_running:
+        global TEST_MODE_ENABLED   # must be at the top of the function
+        if not self._bot_running and not TEST_MODE_ENABLED:
             self._log("Bot is already stopped.")
             return
         self._log("Stopping bot... (may take a few seconds to finish current loop)")
         bot_stop_event.set()
+        # Reset test mode checkbox and global if it was active.
+        # set(False) only updates the BooleanVar; it does NOT call _on_test_mode_toggle,
+        # so the global must be cleared here manually.
+        if TEST_MODE_ENABLED:
+            TEST_MODE_ENABLED = False
+            self._test_mode_var.set(False)
         # Force the underlying chat connection closed immediately so the
         # blocking chat.get() call in run() doesn't keep us waiting.
         if self._bot_instance and self._bot_instance.chat:
@@ -1812,6 +2387,7 @@ class UltraBotGUI:
             self._console_redir = None
         self._set_status("Stopped", self.RED)
         self._log("Bot stopped by user.")
+        notify("Bot Stopped", "The bot has been stopped.")
 
     # ──────────────── Admin CMD ────────────────
     def _send_admin_cmd(self):
@@ -1997,6 +2573,26 @@ class UltraBotGUI:
 # ========================= MAIN =========================
 if __name__ == '__main__':
     load_custom_commands()
-    root = tk.Tk()
-    app  = UltraBotGUI(root)
+    _update_splash(97, "Building interface...")
+
+    # Reuse the hidden host root that was created alongside the splash.
+    # Never call tk.Tk() a second time — that would reset all ttk styles.
+    root = _host_root
+    _gui_root = root
+    app  = UltraBotGUI(root)   # builds GUI while root is still hidden
+
+    _update_splash(100, "Ready!")
+    time.sleep(0.25)    # let the user see 100% for a moment
+    _close_splash()     # destroy splash Toplevel
+    root.deiconify()    # NOW show the fully-built main window
+
+    start_tray_icon()
+
+    def _on_close():
+        # Minimize to tray instead of closing
+        root.withdraw()
+        notify("Running in Tray", "Bot is still running. Right-click the tray icon to exit.")
+
+    root.protocol("WM_DELETE_WINDOW", _on_close)
     root.mainloop()
+    stop_tray_icon()
