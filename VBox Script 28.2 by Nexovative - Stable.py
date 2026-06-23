@@ -7,6 +7,42 @@ import tkinter.font as tkfont
 import os
 import sys
 
+# ========================= UAC ELEVATION =========================
+# If not already running as administrator, re-launch with ShellExecuteW
+# so Windows shows the UAC prompt. The original process exits immediately.
+def _is_admin():
+    try:
+        import ctypes
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except Exception:
+        return False
+
+if not _is_admin():
+    import ctypes
+    # Show an explanation dialog before the UAC prompt so users are not alarmed.
+    # Use the Windows MessageBox API directly — tkinter is not yet initialised.
+    MB_YESNO        = 0x04
+    MB_ICONQUESTION = 0x20
+    IDYES           = 6
+    msg = (
+        "VirtualBox Chat Bot requires Administrator privileges.\n\n"
+        "Reason: Without admin rights, the bot cannot write the\n"
+        "overlay HTML files (vote status, OS vote, etc.).\n\n"
+        "Click Yes to continue, No to exit."
+    )
+    answer = ctypes.windll.user32.MessageBoxW(
+        0, msg, "Administrator Access Required", MB_YESNO | MB_ICONQUESTION
+    )
+    if answer != IDYES:
+        sys.exit(0)
+    # Re-launch with elevated privileges.
+    script = os.path.abspath(sys.argv[0])
+    params = " ".join(f'"{a}"' for a in sys.argv[1:])
+    ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", sys.executable, f'"{script}" {params}', None, 1
+    )
+    sys.exit(0)
+
 # ========================= SPLASH SCREEN =========================
 # Show the splash immediately — before any heavy imports — so the user
 # sees something within milliseconds of launching the script.
@@ -1070,6 +1106,10 @@ def watchdog_restart():
                 if bot_stop_event.wait(10):
                     break
                 continue
+            if not VM_NAME:
+                if bot_stop_event.wait(10):
+                    break
+                continue
             result = subprocess.run([VBOXMANAGE_PATH, 'showvminfo', VM_NAME, '--machinereadable'],
                                     capture_output=True, text=True)
             lines = [l for l in result.stdout.splitlines() if l.startswith('VMState="')]
@@ -1271,7 +1311,6 @@ class YouTubeChatBot:
                                     print("[Admin] Votes cleared")
 
                             # Vote logic
-                            active_count   = max(1, len(active_users))
                             required_votes = 2
                             current_time   = time.time()
 
@@ -1440,19 +1479,24 @@ class ConsoleRedirect:
 
     def write(self, msg):
         self._orig_stdout.write(msg)
-        # Tkinter is not thread-safe; schedule the widget update on the main thread.
+        # Schedule the widget update on the main thread (Tkinter is not thread-safe).
+        # Guard against the widget being destroyed after the bot stops.
         try:
+            widget = self.widget
+            if not widget.winfo_exists():
+                return
             ts = time.strftime("%H:%M:%S")
             formatted = f"[{ts}] {msg}"
             def _update(m=formatted):
                 try:
-                    self.widget.configure(state='normal')
-                    self.widget.insert('end', m)
-                    self.widget.see('end')
-                    self.widget.configure(state='disabled')
+                    if widget.winfo_exists():
+                        widget.configure(state='normal')
+                        widget.insert('end', m)
+                        widget.see('end')
+                        widget.configure(state='disabled')
                 except Exception:
                     pass
-            self.widget.after(0, _update)
+            widget.after(0, _update)
         except Exception:
             pass
 
@@ -2170,9 +2214,9 @@ class UltraBotGUI:
         self._log("[VM] Revert requested by admin.")
         def run():
             global revert_in_progress, revert_start_time
+            revert_in_progress = True
             try:
                 speak_text("Reverting Virtual Machine...")
-                revert_in_progress = True
                 update_status("Reverting...")
                 subprocess.run([VBOXMANAGE_PATH, 'controlvm', VM_NAME, 'poweroff'], check=True)
                 time.sleep(3)
@@ -2182,14 +2226,15 @@ class UltraBotGUI:
                 update_status("Running")
                 play_success_sound()
                 vote_revert.clear()
-                revert_start_time = None
-                revert_in_progress = False
                 update_votes_json("revert", 0, 2, 0)
                 self.root.after(0, lambda: self._vm_set_last("Reverted ✔", self.GREEN))
             except Exception as e:
-                revert_in_progress = False
+                update_status("Revert failed")
                 self.root.after(0, lambda: self._vm_set_last(f"Error: {e}", self.RED))
                 print(f"[VM] Revert error: {e}")
+            finally:
+                revert_start_time = None
+                revert_in_progress = False
         threading.Thread(target=run, daemon=True).start()
 
     def _vm_shutdown(self):
@@ -2406,22 +2451,36 @@ class UltraBotGUI:
             elif c == '!restart':
                 speak_text("Restarting Virtual Machine...")
                 update_status("Restarting...")
-                subprocess.run([VBOXMANAGE_PATH, 'controlvm', VM_NAME, 'reset'])
-                update_status("Running"); play_success_sound()
+                try:
+                    subprocess.run([VBOXMANAGE_PATH, 'controlvm', VM_NAME, 'reset'], check=True)
+                    update_status("Running")
+                    play_success_sound()
+                except Exception as e:
+                    update_status("Restart failed")
+                    print(f"[Admin] Restart error: {e}")
             elif c.startswith('!speak '):
                 speak_text(cmd[7:].strip())
             elif c == '!revert':
+                global revert_in_progress, revert_start_time
                 speak_text("Reverting Virtual Machine...")
                 revert_in_progress = True
                 update_status("Reverting...")
-                subprocess.run([VBOXMANAGE_PATH, 'controlvm', VM_NAME, 'poweroff'], check=True)
-                time.sleep(3)
-                subprocess.run([VBOXMANAGE_PATH, 'snapshot', VM_NAME, 'restorecurrent'], check=True)
-                time.sleep(3)
-                subprocess.run([VBOXMANAGE_PATH, 'startvm', VM_NAME], check=True)
-                update_status("Running"); play_success_sound()
-                vote_revert.clear(); revert_start_time = None; revert_in_progress = False
-                update_votes_json("revert", 0, 2, 0)
+                try:
+                    subprocess.run([VBOXMANAGE_PATH, 'controlvm', VM_NAME, 'poweroff'], check=True)
+                    time.sleep(3)
+                    subprocess.run([VBOXMANAGE_PATH, 'snapshot', VM_NAME, 'restorecurrent'], check=True)
+                    time.sleep(3)
+                    subprocess.run([VBOXMANAGE_PATH, 'startvm', VM_NAME], check=True)
+                    update_status("Running")
+                    play_success_sound()
+                    vote_revert.clear()
+                    update_votes_json("revert", 0, 2, 0)
+                except Exception as e:
+                    update_status("Revert failed")
+                    print(f"[Admin] Revert error: {e}")
+                finally:
+                    revert_start_time = None
+                    revert_in_progress = False
             elif c == '!clearvotes':
                 vote_restart.clear(); vote_revert.clear(); ban_votes.clear()
                 update_votes_json("restartvm", 0, 2, 0)
