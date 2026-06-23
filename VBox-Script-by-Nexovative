@@ -43,7 +43,97 @@ if not _is_admin():
     )
     sys.exit(0)
 
-# ========================= SPLASH SCREEN =========================
+# ========================= VERSION & AUTO-UPDATE =========================
+VERSION = "28.3.0"   # increment this with every release
+
+# Replace these two URLs with your own GitHub repo paths.
+# GITHUB_VERSION_URL  → raw URL of version.json in your repo
+# GITHUB_SCRIPT_URL   → raw URL of the main script file in your repo
+GITHUB_VERSION_URL = "https://raw.githubusercontent.com/NexoUltraProMaxScripts/ChatUsesScripts/refs/heads/main/version.json"
+GITHUB_SCRIPT_URL  = "https://raw.githubusercontent.com/NexoUltraProMaxScripts/ChatUsesScripts/refs/heads/main/VBox-Script-by-Nexovative"
+
+def _check_for_update():
+    """
+    Downloads version.json from GitHub and compares it to the running version.
+    If a newer version is available, asks the user whether to update.
+    Called once during splash, before the main GUI is built.
+    Returns True if the script restarted (caller should exit), False otherwise.
+    """
+    import urllib.request
+    import urllib.error
+    import json as _json
+    import ctypes
+
+    MB_YESNO        = 0x04
+    MB_ICONQUESTION = 0x20
+    MB_ICONERROR    = 0x10
+    IDYES           = 6
+
+    try:
+        _update_splash(8, "Checking for updates...")
+        with urllib.request.urlopen(GITHUB_VERSION_URL, timeout=5) as resp:
+            data       = _json.loads(resp.read().decode("utf-8"))
+            latest_ver = data.get("version", "0.0.0").strip()
+    except Exception as e:
+        # Network unavailable or repo not configured — silently skip.
+        print(f"[Updater] Could not check for updates: {e}")
+        return False
+
+    def _ver_tuple(v):
+        try:
+            return tuple(int(x) for x in v.strip().split("."))
+        except Exception:
+            return (0, 0, 0)
+
+    if _ver_tuple(latest_ver) <= _ver_tuple(VERSION):
+        print(f"[Updater] Up to date ({VERSION}).")
+        return False
+
+    # New version found — ask the user.
+    msg = (
+        f"A new version is available!\n\n"
+        f"  Current version : {VERSION}\n"
+        f"  New version     : {latest_ver}\n\n"
+        f"Update now? The bot will restart automatically after downloading."
+    )
+    answer = ctypes.windll.user32.MessageBoxW(
+        0, msg, "Update Available", MB_YESNO | MB_ICONQUESTION
+    )
+    if answer != IDYES:
+        print(f"[Updater] User declined update to {latest_ver}.")
+        return False
+
+    # Download new script to a temporary file first (atomic update).
+    _update_splash(9, f"Downloading version {latest_ver}...")
+    script_path = os.path.abspath(sys.argv[0])
+    tmp_path    = script_path + ".update_tmp"
+    try:
+        with urllib.request.urlopen(GITHUB_SCRIPT_URL, timeout=30) as resp:
+            new_code = resp.read()
+        with open(tmp_path, "wb") as f:
+            f.write(new_code)
+        # Atomic replace: rename tmp over the live file.
+        if os.path.exists(script_path):
+            os.replace(tmp_path, script_path)
+        print(f"[Updater] Updated to {latest_ver}. Restarting...")
+        # Restart the process with the same arguments.
+        subprocess.Popen([sys.executable, script_path] + sys.argv[1:])
+        sys.exit(0)
+    except Exception as e:
+        # Clean up temp file if something went wrong.
+        if os.path.exists(tmp_path):
+            try: os.remove(tmp_path)
+            except Exception: pass
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            f"Update failed:\n{e}\n\nThe bot will start with the current version.",
+            "Update Error",
+            MB_ICONERROR
+        )
+        print(f"[Updater] Update failed: {e}")
+        return False
+
+
 # Show the splash immediately — before any heavy imports — so the user
 # sees something within milliseconds of launching the script.
 
@@ -141,6 +231,7 @@ def _close_splash():
 # ── Show splash immediately ──
 _create_splash()
 _update_splash(5, "Loading GUI...")
+_check_for_update()   # checks GitHub, asks user if update available, restarts if accepted
 
 # ========================= HEAVY IMPORTS =========================
 # These run AFTER the splash is visible.
