@@ -44,7 +44,7 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & AUTO-UPDATE =========================
-VERSION = "28.4.0"   # increment this with every release
+VERSION = "28.4.1"   # increment this with every release
 
 # Replace these two URLs with your own GitHub repo paths.
 # GITHUB_VERSION_URL  → raw URL of version.json in your repo
