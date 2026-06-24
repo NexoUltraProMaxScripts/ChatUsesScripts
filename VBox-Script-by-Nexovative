@@ -44,7 +44,7 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & AUTO-UPDATE =========================
-VERSION = "28.3.0"   # increment this with every release
+VERSION = "28.4.0"   # increment this with every release
 
 # Replace these two URLs with your own GitHub repo paths.
 # GITHUB_VERSION_URL  → raw URL of version.json in your repo
@@ -624,8 +624,52 @@ vbox = mgr.getVirtualBox()
 _update_splash(92, "Loading configuration...")
 
 active_users = set()
-bot_stop_event = threading.Event()   # set this to actually stop the bot + its background threads
-TEST_MODE_ENABLED = False            # when True, bot reads commands from console instead of YouTube chat
+bot_stop_event = threading.Event()
+TEST_MODE_ENABLED = False
+
+# ========================= ERROR RECOVERY SYSTEM =========================
+ERROR_LOG_FILE = "error_log.txt"
+
+def log_error(source, error, extra=""):
+    """Append a timestamped error entry to error_log.txt."""
+    try:
+        ts  = time.strftime("%Y-%m-%d %H:%M:%S")
+        msg = f"[{ts}] [{source}] {error}"
+        if extra:
+            msg += f" | {extra}"
+        with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+        print(f"[ErrorLog] {msg}")
+    except Exception as e:
+        print(f"[ErrorLog] Could not write log: {e}")
+
+def retry_vbox(fn, attempts=3, delay=3, source="VBox"):
+    """
+    Calls fn() up to `attempts` times with `delay` seconds between tries.
+    Returns (success: bool, last_exception).
+    fn must be a zero-argument callable wrapping a VBoxManage/subprocess call.
+    """
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            fn()
+            return True, None
+        except Exception as e:
+            last_exc = e
+            log_error(source, f"Attempt {attempt}/{attempts} failed: {e}")
+            if attempt < attempts:
+                time.sleep(delay)
+    return False, last_exc
+
+def _global_exception_handler(exc_type, exc_value, exc_tb):
+    """Catch any otherwise-unhandled exception, log it and show a notification."""
+    import traceback
+    tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    log_error("UNCAUGHT", exc_value, tb_str.strip())
+    notify("Unexpected Error", f"{exc_type.__name__}: {exc_value}", timeout=8)
+
+sys.excepthook = _global_exception_handler
+
 
 def run_test_mode():
     """
@@ -729,6 +773,85 @@ revert_in_progress   = False
 restart_in_progress  = False
 AUTO_START_ENABLED = True   # if False, watchdog_restart will not auto-revive a powered-off VM
 AUTO_START_CONFIG_FILE = "auto_start_config.json"
+
+APPEARANCE_CONFIG_FILE = "appearance_config.json"
+
+# Built-in theme presets
+THEMES = {
+    "Dark Purple (Default)": {
+        "BG": "#0f0f1a", "BG2": "#16162a", "BG3": "#1e1e35",
+        "ACCENT": "#7c5cbf", "ACCENT2": "#a07cdf",
+        "TEXT": "#e8e8f0", "TEXTDIM": "#8888aa",
+        "CONSOLE": "#0a0a14", "BORDER": "#2d2d50",
+    },
+    "Dark Blue": {
+        "BG": "#0a0f1e", "BG2": "#101828", "BG3": "#1a2440",
+        "ACCENT": "#2979ff", "ACCENT2": "#5c9eff",
+        "TEXT": "#e0e8ff", "TEXTDIM": "#7080aa",
+        "CONSOLE": "#070b14", "BORDER": "#1e2d55",
+    },
+    "Dark Green": {
+        "BG": "#0a120a", "BG2": "#101a10", "BG3": "#162416",
+        "ACCENT": "#2ecc71", "ACCENT2": "#58d68d",
+        "TEXT": "#e0f0e0", "TEXTDIM": "#709070",
+        "CONSOLE": "#070e07", "BORDER": "#1a301a",
+    },
+    "Dark Red": {
+        "BG": "#140a0a", "BG2": "#1e1010", "BG3": "#2a1414",
+        "ACCENT": "#e53935", "ACCENT2": "#ff6659",
+        "TEXT": "#f0e0e0", "TEXTDIM": "#aa7070",
+        "CONSOLE": "#0e0707", "BORDER": "#3a1a1a",
+    },
+    "Dark Orange": {
+        "BG": "#14100a", "BG2": "#1e1810", "BG3": "#2a2014",
+        "ACCENT": "#ff6d00", "ACCENT2": "#ff9e40",
+        "TEXT": "#f0ebe0", "TEXTDIM": "#aa9070",
+        "CONSOLE": "#0e0c07", "BORDER": "#3a2c1a",
+    },
+    "Light": {
+        "BG": "#f4f4f8", "BG2": "#e8e8f0", "BG3": "#dcdce8",
+        "ACCENT": "#7c5cbf", "ACCENT2": "#a07cdf",
+        "TEXT": "#1a1a2e", "TEXTDIM": "#555570",
+        "CONSOLE": "#ffffff", "BORDER": "#c0c0d8",
+    },
+    "Light Blue": {
+        "BG": "#f0f4ff", "BG2": "#e0e8ff", "BG3": "#ccd8ff",
+        "ACCENT": "#1565c0", "ACCENT2": "#1e88e5",
+        "TEXT": "#0a1030", "TEXTDIM": "#445580",
+        "CONSOLE": "#ffffff", "BORDER": "#b0c4ee",
+    },
+    "OLED Black": {
+        "BG": "#000000", "BG2": "#0a0a0a", "BG3": "#121212",
+        "ACCENT": "#bb86fc", "ACCENT2": "#e0b3ff",
+        "TEXT": "#ffffff", "TEXTDIM": "#888888",
+        "CONSOLE": "#000000", "BORDER": "#1e1e1e",
+    },
+}
+
+def load_appearance_config():
+    """Load saved appearance settings and apply them to UltraBotGUI class attributes."""
+    try:
+        if os.path.exists(APPEARANCE_CONFIG_FILE):
+            with open(APPEARANCE_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            colors = data.get("colors", {})
+            for key, val in colors.items():
+                if hasattr(UltraBotGUI, key) and isinstance(val, str) and val.startswith("#"):
+                    setattr(UltraBotGUI, key, val)
+            font_size = data.get("font_size")
+            if font_size:
+                UltraBotGUI._FONT_SIZE = int(font_size)
+            print(f"[Appearance] Config loaded.")
+    except Exception as e:
+        print(f"[Appearance] Load error: {e}")
+
+def save_appearance_config(colors: dict, font_size: int):
+    try:
+        with open(APPEARANCE_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump({"colors": colors, "font_size": font_size}, f, indent=2)
+        print("[Appearance] Config saved.")
+    except Exception as e:
+        print(f"[Appearance] Save error: {e}")
 
 def load_auto_start_config():
     global AUTO_START_ENABLED
@@ -937,12 +1060,17 @@ def update_os_vote_status():
         print(f"[OSVoting] Status write error: {e}")
 
 def switch_os(target_entry, announce=True):
-    """Powers off the current OS VM (if different) and boots the target OS VM."""
+    """
+    Powers off the current OS VM (if different) and boots the target OS VM.
+    Retries startvm up to 3 times. If all attempts fail, tries to revive
+    the previous (loser) VM so at least something is running.
+    """
     global current_os_vm, VM_NAME, os_switch_in_progress, os_votes, os_vote_start_time
     if not os_switch_lock.acquire(blocking=False):
         print("[OSVoting] Switch already in progress, ignoring duplicate request.")
         return
     os_switch_in_progress = True
+    previous_vm = current_os_vm   # remember loser in case winner fails to start
     try:
         target_name = target_entry.get("name", "Unknown OS")
         target_vm   = target_entry.get("vm", "")
@@ -952,23 +1080,57 @@ def switch_os(target_entry, announce=True):
         if announce:
             speak_text(f"Switching to {target_name}...")
         update_status(f"Switching to {target_name}...")
+
+        # Step 1: power off the loser (best-effort, non-fatal)
         if current_os_vm and current_os_vm != target_vm:
-            try:
-                subprocess.run([VBOXMANAGE_PATH, 'controlvm', current_os_vm, 'poweroff'], check=True)
-                time.sleep(3)
-            except Exception as e:
-                print(f"[OSVoting] Poweroff error ({current_os_vm}): {e}")
-        try:
-            subprocess.run([VBOXMANAGE_PATH, 'startvm', target_vm], check=True)
-        except Exception as e:
-            print(f"[OSVoting] Startvm error ({target_vm}): {e}")
-        current_os_vm = target_vm
-        VM_NAME = target_vm
-        update_status(f"Running {target_name}")
-        play_success_sound()
-        notify("OS Switched", f"Now running: {target_name}")
-        save_os_voting_config()   # persist last active VM so bot remembers it on next launch
-        print(f"[OSVoting] Switched to '{target_name}' ({target_vm})")
+            ok, err = retry_vbox(
+                lambda: subprocess.run(
+                    [VBOXMANAGE_PATH, 'controlvm', current_os_vm, 'poweroff'], check=True
+                ),
+                attempts=3, delay=3, source="OSVoting/poweroff"
+            )
+            if not ok:
+                log_error("OSVoting", f"Could not power off loser VM '{current_os_vm}': {err}")
+            time.sleep(3)
+
+        # Step 2: start the winner
+        ok, err = retry_vbox(
+            lambda: subprocess.run([VBOXMANAGE_PATH, 'startvm', target_vm], check=True),
+            attempts=3, delay=4, source="OSVoting/startvm"
+        )
+
+        if ok:
+            current_os_vm = target_vm
+            VM_NAME = target_vm
+            update_status(f"Running {target_name}")
+            play_success_sound()
+            notify("OS Switched", f"Now running: {target_name}")
+            save_os_voting_config()
+            print(f"[OSVoting] Switched to '{target_name}' ({target_vm})")
+        else:
+            # Winner failed — attempt to revive the previous (loser) VM
+            log_error("OSVoting", f"All startvm attempts failed for '{target_name}'", str(err))
+            notify("OS Switch Failed",
+                   f"Could not start {target_name}. Attempting to restore previous OS...",
+                   timeout=7)
+            update_status("OS switch failed — restoring previous OS...")
+            if previous_vm and previous_vm != target_vm:
+                ok2, err2 = retry_vbox(
+                    lambda: subprocess.run([VBOXMANAGE_PATH, 'startvm', previous_vm], check=True),
+                    attempts=3, delay=4, source="OSVoting/fallback"
+                )
+                if ok2:
+                    update_status(f"Restored previous OS")
+                    notify("Previous OS Restored", "The previous OS was brought back online.")
+                    print(f"[OSVoting] Fallback: restored previous VM '{previous_vm}'")
+                else:
+                    log_error("OSVoting", f"Fallback also failed for '{previous_vm}'", str(err2))
+                    notify("Critical: No VM Running",
+                           "Both the target and previous OS failed to start. Check VirtualBox.",
+                           timeout=10)
+                    update_status("ERROR: no VM running")
+            else:
+                notify("OS Switch Failed", f"Could not start {target_name}. No previous OS to restore.", timeout=8)
     finally:
         os_votes.clear()
         os_vote_start_time = None
@@ -1201,8 +1363,10 @@ def watchdog_restart():
                 if bot_stop_event.wait(10):
                     break
                 continue
-            result = subprocess.run([VBOXMANAGE_PATH, 'showvminfo', VM_NAME, '--machinereadable'],
-                                    capture_output=True, text=True)
+            result = subprocess.run(
+                [VBOXMANAGE_PATH, 'showvminfo', VM_NAME, '--machinereadable'],
+                capture_output=True, text=True
+            )
             lines = [l for l in result.stdout.splitlines() if l.startswith('VMState="')]
             if lines:
                 vm_state = lines[0].split('=')[1].strip('"')
@@ -1214,11 +1378,25 @@ def watchdog_restart():
                         update_status("Auto-starting...")
                         speak_text("Auto starting virtual machine...")
                         notify("VM Auto-Restarted", f"VM was found {vm_state}. Auto-restart triggered.")
-                        subprocess.run([VBOXMANAGE_PATH, 'startvm', VM_NAME], check=True)
-                        update_status("Running")
-                        speak_text("Running")
+                        ok, err = retry_vbox(
+                            lambda: subprocess.run(
+                                [VBOXMANAGE_PATH, 'startvm', VM_NAME], check=True
+                            ),
+                            attempts=3, delay=5, source="Watchdog/startvm"
+                        )
+                        if ok:
+                            update_status("Running")
+                            speak_text("Running")
+                        else:
+                            log_error("Watchdog", f"Failed to auto-restart VM after 3 attempts", str(err))
+                            notify("Watchdog: VM Start Failed",
+                                   "Could not restart the VM after 3 attempts. Check VirtualBox.",
+                                   timeout=10)
+                            update_status("ERROR: VM failed to start")
+                elif vm_state == "running":
+                    pass  # all good
         except Exception as e:
-            print(f"[Watchdog] Error: {e}")
+            log_error("Watchdog", e)
         if bot_stop_event.wait(10):
             break
     print("[Watchdog] Stopped.")
@@ -1227,6 +1405,7 @@ class YouTubeChatBot:
     def __init__(self):
         self.video_id = VIDEO_ID
         self.chat = None
+        self._reconnect_failures = 0
         self.reconnect()
         update_overlay()
         threading.Thread(target=start_overlay_server, daemon=True).start()
@@ -1258,10 +1437,17 @@ class YouTubeChatBot:
             except: pass
         try:
             self.chat = pytchat.create(video_id=self.video_id)
-            print("[Bot] Reconnect successful.")
+            if self._reconnect_failures > 0:
+                print(f"[Bot] Reconnect successful after {self._reconnect_failures} failure(s).")
+            self._reconnect_failures = 0
             return True
         except Exception as e:
-            print(f"[Bot] Reconnect failed: {e}")
+            self._reconnect_failures += 1
+            log_error("Bot/Reconnect", e, f"consecutive failures: {self._reconnect_failures}")
+            if self._reconnect_failures == 5:
+                notify("Chat Connection Lost",
+                       "Failed to connect to YouTube chat 5 times in a row. Check the Video ID and your internet.",
+                       timeout=10)
             return False
 
     def run(self):
@@ -1420,14 +1606,18 @@ class YouTubeChatBot:
                                     update_status("Restarting...")
                                     update_votes_json("restartvm", required_votes, required_votes, 0)
                                     try:
-                                        subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'reset'], check=True)
-                                        restart_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
-                                        update_status("Running"); play_success_sound()
-                                        notify("VM Restarted", "Restart triggered by owner.")
-                                    except Exception as e:
-                                        print(f"[Vote] Restart error: {e}")
-                                        update_status("Restart failed")
-                                        notify("Restart Failed", str(e), timeout=6)
+                                        ok, err = retry_vbox(
+                                            lambda: subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'reset'], check=True),
+                                            attempts=3, delay=3, source="Vote/restart-owner"
+                                        )
+                                        if ok:
+                                            restart_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
+                                            update_status("Running"); play_success_sound()
+                                            notify("VM Restarted", "Restart triggered by owner.")
+                                        else:
+                                            update_status("Restart failed")
+                                            log_error("Vote/restart", f"Owner restart failed after retries", str(err))
+                                            notify("Restart Failed", str(err), timeout=6)
                                     finally:
                                         update_votes_json("restartvm", 0, required_votes, 0)
                                         restart_in_progress = False
@@ -1445,14 +1635,18 @@ class YouTubeChatBot:
                                     restart_in_progress = True
                                     update_status("Restarting...")
                                     try:
-                                        subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'reset'], check=True)
-                                        restart_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
-                                        update_status("Running"); play_success_sound()
-                                        notify("VM Restarted", "Restart vote passed by chat.")
-                                    except Exception as e:
-                                        print(f"[Vote] Restart error: {e}")
-                                        update_status("Restart failed")
-                                        notify("Restart Failed", str(e), timeout=6)
+                                        ok, err = retry_vbox(
+                                            lambda: subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'reset'], check=True),
+                                            attempts=3, delay=3, source="Vote/restart-chat"
+                                        )
+                                        if ok:
+                                            restart_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
+                                            update_status("Running"); play_success_sound()
+                                            notify("VM Restarted", "Restart vote passed by chat.")
+                                        else:
+                                            update_status("Restart failed")
+                                            log_error("Vote/restart", "Chat restart failed after retries", str(err))
+                                            notify("Restart Failed", str(err), timeout=6)
                                     finally:
                                         update_votes_json("restartvm", 0, required_votes, 0)
                                         restart_in_progress = False
@@ -1472,18 +1666,29 @@ class YouTubeChatBot:
                                     update_status("Reverting...")
                                     update_votes_json("revert", required_votes, required_votes, 0)
                                     try:
-                                        subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'poweroff'], check=True)
+                                        ok, err = retry_vbox(
+                                            lambda: subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'poweroff'], check=True),
+                                            attempts=3, delay=3, source="Vote/revert-owner/poweroff"
+                                        )
                                         time.sleep(3)
-                                        subprocess.run([VBOXMANAGE_PATH,'snapshot',VM_NAME,'restorecurrent'], check=True)
+                                        ok2, err2 = retry_vbox(
+                                            lambda: subprocess.run([VBOXMANAGE_PATH,'snapshot',VM_NAME,'restorecurrent'], check=True),
+                                            attempts=3, delay=3, source="Vote/revert-owner/snapshot"
+                                        )
                                         time.sleep(3)
-                                        subprocess.run([VBOXMANAGE_PATH,'startvm',VM_NAME], check=True)
-                                        revert_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
-                                        update_status("Running"); play_success_sound()
-                                        notify("VM Reverted", "Snapshot restored by owner.")
-                                    except Exception as e:
-                                        print(f"[Vote] Revert error: {e}")
-                                        update_status("Revert failed")
-                                        notify("Revert Failed", str(e), timeout=6)
+                                        ok3, err3 = retry_vbox(
+                                            lambda: subprocess.run([VBOXMANAGE_PATH,'startvm',VM_NAME], check=True),
+                                            attempts=3, delay=4, source="Vote/revert-owner/startvm"
+                                        )
+                                        if ok2 and ok3:
+                                            revert_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
+                                            update_status("Running"); play_success_sound()
+                                            notify("VM Reverted", "Snapshot restored by owner.")
+                                        else:
+                                            failed = "snapshot" if not ok2 else "startvm"
+                                            update_status("Revert failed")
+                                            log_error("Vote/revert", f"Owner revert failed at {failed}", str(err2 or err3))
+                                            notify("Revert Failed", f"Failed at {failed} step.", timeout=6)
                                     finally:
                                         update_votes_json("revert", 0, required_votes, 0)
                                         revert_in_progress = False
@@ -1501,18 +1706,29 @@ class YouTubeChatBot:
                                     revert_in_progress = True
                                     update_status("Reverting...")
                                     try:
-                                        subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'poweroff'], check=True)
+                                        ok, err = retry_vbox(
+                                            lambda: subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'poweroff'], check=True),
+                                            attempts=3, delay=3, source="Vote/revert-chat/poweroff"
+                                        )
                                         time.sleep(3)
-                                        subprocess.run([VBOXMANAGE_PATH,'snapshot',VM_NAME,'restorecurrent'], check=True)
+                                        ok2, err2 = retry_vbox(
+                                            lambda: subprocess.run([VBOXMANAGE_PATH,'snapshot',VM_NAME,'restorecurrent'], check=True),
+                                            attempts=3, delay=3, source="Vote/revert-chat/snapshot"
+                                        )
                                         time.sleep(3)
-                                        subprocess.run([VBOXMANAGE_PATH,'startvm',VM_NAME], check=True)
-                                        revert_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
-                                        update_status("Running"); play_success_sound()
-                                        notify("VM Reverted", "Snapshot restored by chat vote.")
-                                    except Exception as e:
-                                        print(f"[Vote] Revert error: {e}")
-                                        update_status("Revert failed")
-                                        notify("Revert Failed", str(e), timeout=6)
+                                        ok3, err3 = retry_vbox(
+                                            lambda: subprocess.run([VBOXMANAGE_PATH,'startvm',VM_NAME], check=True),
+                                            attempts=3, delay=4, source="Vote/revert-chat/startvm"
+                                        )
+                                        if ok2 and ok3:
+                                            revert_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
+                                            update_status("Running"); play_success_sound()
+                                            notify("VM Reverted", "Snapshot restored by chat vote.")
+                                        else:
+                                            failed = "snapshot" if not ok2 else "startvm"
+                                            update_status("Revert failed")
+                                            log_error("Vote/revert", f"Chat revert failed at {failed}", str(err2 or err3))
+                                            notify("Revert Failed", f"Failed at {failed} step.", timeout=6)
                                     finally:
                                         update_votes_json("revert", 0, required_votes, 0)
                                         revert_in_progress = False
@@ -1618,6 +1834,7 @@ class UltraBotGUI:
     CONSOLE  = "#0a0a14"
     CONTEXT  = "#00e676"
     BORDER   = "#2d2d50"
+    _FONT_SIZE = 10
 
     def __init__(self, root):
         self.root = root
@@ -1636,6 +1853,7 @@ class UltraBotGUI:
         self._editing_cmd  = None   # trigger key being edited
         self._step_items   = []     # list of {"action":..,"args":..} dicts
 
+        load_appearance_config()
         self._build_styles()
         load_os_voting_config()
         load_auto_start_config()
@@ -1645,18 +1863,19 @@ class UltraBotGUI:
 
     # ── TTK Styles ──
     def _build_styles(self):
+        fs = self.__class__._FONT_SIZE
         style = ttk.Style()
         style.theme_use("clam")
         style.configure(".",
             background=self.BG, foreground=self.TEXT,
             fieldbackground=self.BG2, bordercolor=self.BORDER,
             troughcolor=self.BG2, selectbackground=self.ACCENT,
-            selectforeground=self.TEXT, font=("Segoe UI", 10))
+            selectforeground=self.TEXT, font=("Segoe UI", fs))
         style.configure("TNotebook",
             background=self.BG, tabmargins=[2, 4, 0, 0])
         style.configure("TNotebook.Tab",
             background=self.BG2, foreground=self.TEXTDIM,
-            padding=[16, 6], font=("Segoe UI", 10, "bold"))
+            padding=[16, 6], font=("Segoe UI", fs, "bold"))
         style.map("TNotebook.Tab",
             background=[("selected", self.BG3)],
             foreground=[("selected", self.TEXT)])
@@ -1671,7 +1890,6 @@ class UltraBotGUI:
             fieldbackground=self.BG3, foreground=self.TEXT,
             selectbackground=self.ACCENT, arrowcolor=self.ACCENT2)
         style.map("TCombobox", fieldbackground=[("readonly", self.BG3)])
-        # Buttons
         for name, bg, fg in [
             ("Green.TButton",  self.GREEN,  "#000"),
             ("Red.TButton",    self.RED,    "#fff"),
@@ -1679,7 +1897,7 @@ class UltraBotGUI:
             ("Dim.TButton",    self.BG3,    self.TEXT),
         ]:
             style.configure(name, background=bg, foreground=fg,
-                            font=("Segoe UI", 10, "bold"), relief="flat", padding=[10,5])
+                            font=("Segoe UI", fs, "bold"), relief="flat", padding=[10,5])
             style.map(name, background=[("active", self.ACCENT2)])
         style.configure("TScrollbar",
             background=self.BG3, troughcolor=self.BG,
@@ -1707,15 +1925,18 @@ class UltraBotGUI:
         tab2 = ttk.Frame(nb)
         tab3 = ttk.Frame(nb)
         tab4 = ttk.Frame(nb)
+        tab5 = ttk.Frame(nb)
         nb.add(tab1, text="  ▶  Main  ")
         nb.add(tab2, text="  ⚙  Command Builder  ")
         nb.add(tab3, text="  🖥  VM Controls  ")
         nb.add(tab4, text="  🗳  OS Voting  ")
+        nb.add(tab5, text="  🎨  Appearance  ")
 
         self._build_main_tab(tab1)
         self._build_cmd_builder_tab(tab2)
         self._build_vm_controls_tab(tab3)
         self._build_os_voting_tab(tab4)
+        self._build_appearance_tab(tab5)
         self._sync_main_vm_lock()
 
     # ──────────────── TAB 1 : MAIN ────────────────
@@ -1734,7 +1955,7 @@ class UltraBotGUI:
         yt_entry = ttk.Entry(card, textvariable=self._yt_var, width=32,
                              font=("Segoe UI Mono", 10))
         yt_entry.grid(row=0, column=1, sticky="ew", padx=(0,12), ipady=4)
-        tk.Label(card, text="🔗", bg=self.BG2, fg=self.ACCENT2,
+        tk.Label(card, text="🔗", bg=self.BG2, fg=self.ACCENT,
                  font=("Segoe UI",12)).grid(row=0, column=2, padx=2)
 
         # VM selector
@@ -1859,7 +2080,7 @@ class UltraBotGUI:
         pane.add(left, minsize=180, width=220)
 
         tk.Label(left, text="Custom Commands",
-                 bg=self.BG2, fg=self.ACCENT2,
+                 bg=self.BG2, fg=self.ACCENT,
                  font=("Segoe UI",10,"bold")).pack(anchor="w", pady=(0,6))
 
         list_frame = tk.Frame(left, bg=self.BG3, highlightbackground=self.BORDER,
@@ -1905,7 +2126,7 @@ class UltraBotGUI:
         hdr_row = tk.Frame(chain_card, bg=self.BG3)
         hdr_row.pack(fill="x", pady=(0,4))
         tk.Label(hdr_row, text="⚡ Quick Chain Input",
-                 bg=self.BG3, fg=self.ACCENT2,
+                 bg=self.BG3, fg=self.ACCENT,
                  font=("Segoe UI",9,"bold")).pack(side="left")
         tk.Label(hdr_row,
                  text="  Write in chat syntax → parse into steps",
@@ -1933,7 +2154,7 @@ class UltraBotGUI:
         steps_hdr = tk.Frame(right, bg=self.BG2)
         steps_hdr.pack(fill="x", pady=(0,4))
         tk.Label(steps_hdr, text="Steps",
-                 bg=self.BG2, fg=self.ACCENT2,
+                 bg=self.BG2, fg=self.ACCENT,
                  font=("Segoe UI",10,"bold")).pack(side="left")
         tk.Label(steps_hdr,
                  text="  (Fill via Parse or add manually below)",
@@ -2011,7 +2232,7 @@ class UltraBotGUI:
 
         # Header
         tk.Label(parent, text="Virtual Machine Controls",
-                 bg=self.BG, fg=self.ACCENT2,
+                 bg=self.BG, fg=self.ACCENT,
                  font=("Segoe UI", 13, "bold")).pack(pady=(24, 4))
         tk.Label(parent,
                  text="Direct admin actions — no vote required.",
@@ -2073,7 +2294,7 @@ class UltraBotGUI:
         header = ttk.Frame(parent, style="TFrame")
         header.pack(fill="x", padx=16, pady=(16, 4))
         tk.Label(header, text="Chat OS Voting System",
-                 bg=self.BG, fg=self.ACCENT2,
+                 bg=self.BG, fg=self.ACCENT,
                  font=("Segoe UI", 13, "bold")).pack(anchor="w")
         tk.Label(header,
                  text=(f"Viewers vote with chat commands (e.g. !win7, !win8). "
@@ -2195,6 +2416,208 @@ class UltraBotGUI:
         state = "readonly" if enabled else "disabled"
         for combo in self._os_vm_combos:
             combo.configure(state=state)
+
+    # ──────────────── TAB 5 : APPEARANCE ────────────────
+    def _build_appearance_tab(self, parent):
+        parent.configure(style="TFrame")
+
+        COLOR_KEYS = [
+            ("BG",      "Background (main)"),
+            ("BG2",     "Background (cards)"),
+            ("BG3",     "Background (inputs)"),
+            ("ACCENT",  "Accent color"),
+            ("ACCENT2", "Accent highlight"),
+            ("TEXT",    "Text (primary)"),
+            ("TEXTDIM", "Text (dim)"),
+            ("CONSOLE", "Console background"),
+            ("BORDER",  "Border color"),
+        ]
+
+        header = ttk.Frame(parent, style="TFrame")
+        header.pack(fill="x", padx=16, pady=(14, 6))
+        tk.Label(header, text="Appearance & Theme",
+                 bg=self.BG, fg=self.ACCENT,
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        tk.Label(header,
+                 text="Changes apply immediately. Restart is NOT required.",
+                 bg=self.BG, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
+
+        # ── Preset themes ──
+        preset_card = ttk.Frame(parent, style="Card.TFrame", padding=14)
+        preset_card.pack(fill="x", padx=16, pady=(0, 8))
+        tk.Label(preset_card, text="Theme Presets",
+                 bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 8))
+
+        preset_row = tk.Frame(preset_card, bg=self.BG2)
+        preset_row.pack(fill="x")
+        self._preset_var = tk.StringVar(value="Dark Purple (Default)")
+
+        btn_frame = tk.Frame(preset_card, bg=self.BG2)
+        btn_frame.pack(fill="x", pady=(8, 0))
+        for name in THEMES:
+            is_dark = "Light" not in name
+            fg_col  = "#ddd" if is_dark else "#111"
+            bg_col  = THEMES[name]["ACCENT"]
+            b = tk.Button(btn_frame, text=name,
+                          bg=bg_col, fg=fg_col,
+                          font=("Segoe UI", 8, "bold"),
+                          relief="flat", padx=8, pady=4,
+                          cursor="hand2",
+                          command=lambda n=name: self._apply_preset(n))
+            b.pack(side="left", padx=(0, 6), pady=2)
+
+        # ── Font size ──
+        font_card = ttk.Frame(parent, style="Card.TFrame", padding=14)
+        font_card.pack(fill="x", padx=16, pady=(0, 8))
+        tk.Label(font_card, text="Font Size",
+                 bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 6))
+        font_row = tk.Frame(font_card, bg=self.BG2)
+        font_row.pack(anchor="w")
+        self._font_size_var = tk.IntVar(value=self.__class__._FONT_SIZE)
+        tk.Scale(font_row, from_=8, to=14, orient="horizontal",
+                 variable=self._font_size_var, length=200,
+                 bg=self.BG2, fg=self.TEXT, troughcolor=self.BG3,
+                 highlightthickness=0, activebackground=self.ACCENT,
+                 command=lambda _: self._apply_font_size()).pack(side="left")
+        self._font_size_label = tk.Label(font_row,
+                 text=f"{self.__class__._FONT_SIZE}pt",
+                 bg=self.BG2, fg=self.ACCENT,
+                 font=("Segoe UI", 10, "bold"), width=4)
+        self._font_size_label.pack(side="left", padx=(8, 0))
+
+        # ── Custom color pickers ──
+        colors_card = ttk.Frame(parent, style="Card.TFrame", padding=14)
+        colors_card.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        tk.Label(colors_card, text="Custom Colors",
+                 bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 8))
+
+        self._color_vars    = {}
+        self._color_swatches = {}
+
+        grid = tk.Frame(colors_card, bg=self.BG2)
+        grid.pack(fill="x")
+        for i, (key, label) in enumerate(COLOR_KEYS):
+            row = i // 3
+            col = i %  3
+            cell = tk.Frame(grid, bg=self.BG2, padx=6, pady=4)
+            cell.grid(row=row, column=col, sticky="w", padx=4, pady=2)
+
+            tk.Label(cell, text=label, bg=self.BG2, fg=self.TEXTDIM,
+                     font=("Segoe UI", 8)).pack(anchor="w")
+
+            swatch_row = tk.Frame(cell, bg=self.BG2)
+            swatch_row.pack(anchor="w")
+
+            current_val = getattr(self.__class__, key, "#000000")
+            var = tk.StringVar(value=current_val)
+            self._color_vars[key] = var
+
+            swatch = tk.Label(swatch_row, bg=current_val, width=3, height=1,
+                              relief="flat", cursor="hand2")
+            swatch.pack(side="left", padx=(0, 4))
+            self._color_swatches[key] = swatch
+            swatch.bind("<Button-1>", lambda e, k=key: self._pick_color(k))
+
+            entry = ttk.Entry(swatch_row, textvariable=var, width=9,
+                              font=("Segoe UI Mono", 9))
+            entry.pack(side="left")
+            entry.bind("<Return>",    lambda e, k=key: self._apply_color_entry(k))
+            entry.bind("<FocusOut>",  lambda e, k=key: self._apply_color_entry(k))
+
+        # ── Buttons ──
+        btn_row = tk.Frame(parent, bg=self.BG)
+        btn_row.pack(fill="x", padx=16, pady=(0, 14))
+        ttk.Button(btn_row, text="💾 Save Theme",   style="Green.TButton",
+                   command=self._save_appearance).pack(side="left", padx=(0, 8))
+        ttk.Button(btn_row, text="↩ Reset to Default", style="Dim.TButton",
+                   command=self._reset_appearance).pack(side="left")
+
+    def _apply_preset(self, name):
+        colors = THEMES.get(name, {})
+        for key, val in colors.items():
+            setattr(self.__class__, key, val)
+            if hasattr(self, '_color_vars') and key in self._color_vars:
+                self._color_vars[key].set(val)
+        self._full_ui_rebuild()
+        self._log(f"[Appearance] Applied preset: {name}")
+
+    def _pick_color(self, key):
+        from tkinter import colorchooser
+        current = getattr(self.__class__, key, "#000000")
+        result  = colorchooser.askcolor(color=current, title=f"Pick color for {key}")
+        if result and result[1]:
+            setattr(self.__class__, key, result[1])
+            self._full_ui_rebuild()
+
+    def _apply_color_entry(self, key):
+        val = self._color_vars[key].get().strip()
+        if not (val.startswith("#") and len(val) in (4, 7)):
+            return
+        setattr(self.__class__, key, val)
+        self._full_ui_rebuild()
+
+    def _apply_font_size(self):
+        fs = self._font_size_var.get()
+        self.__class__._FONT_SIZE = fs
+        self._full_ui_rebuild()
+
+    def _full_ui_rebuild(self):
+        """
+        Destroys and rebuilds the entire UI so every widget picks up the
+        new colors from class attributes. Restores the active tab afterwards.
+        """
+        # Remember which tab was open (by index)
+        try:
+            nb = [w for w in self.root.winfo_children()
+                  if isinstance(w, ttk.Notebook)]
+            active_tab = nb[0].index(nb[0].select()) if nb else 4
+        except Exception:
+            active_tab = 4   # stay on Appearance tab
+
+        # Destroy everything inside root
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+        # Rebuild
+        self._build_styles()
+        self.root.configure(bg=self.BG)
+        self._editing_cmd = None
+        self._step_items  = []
+        self._build_ui()
+
+        # Restore tab
+        try:
+            nb = [w for w in self.root.winfo_children()
+                  if isinstance(w, ttk.Notebook)]
+            if nb:
+                nb[0].select(active_tab)
+        except Exception:
+            pass
+
+        self.root.update_idletasks()
+
+    def _rebuild_styles_and_refresh(self):
+        self._full_ui_rebuild()
+
+    def _save_appearance(self):
+        colors = {key: getattr(self.__class__, key)
+                  for key in ["BG","BG2","BG3","ACCENT","ACCENT2",
+                               "TEXT","TEXTDIM","CONSOLE","BORDER"]}
+        save_appearance_config(colors, self.__class__._FONT_SIZE)
+        messagebox.showinfo("Saved",
+            "Appearance settings saved.\nThey will be applied on next launch too.")
+
+    def _reset_appearance(self):
+        defaults = THEMES["Dark Purple (Default)"]
+        for key, val in defaults.items():
+            setattr(self.__class__, key, val)
+        self.__class__._FONT_SIZE = 10
+        self._full_ui_rebuild()
+        self._log("[Appearance] Reset to default theme.")
 
     def _on_auto_start_toggle(self):
         global AUTO_START_ENABLED
@@ -2739,9 +3162,28 @@ if __name__ == '__main__':
     start_tray_icon()
 
     def _on_close():
-        # Minimize to tray instead of closing
-        root.withdraw()
-        notify("Running in Tray", "Bot is still running. Right-click the tray icon to exit.")
+        import ctypes
+        MB_YESNOCANCEL  = 0x03
+        MB_ICONQUESTION = 0x20
+        IDYES           = 6
+        IDNO            = 7
+        answer = ctypes.windll.user32.MessageBoxW(
+            0,
+            "Minimize to system tray instead of closing?\n\n"
+            "Yes  → minimize to tray (bot keeps running)\n"
+            "No   → exit completely\n"
+            "Cancel → go back",
+            "Close",
+            MB_YESNOCANCEL | MB_ICONQUESTION
+        )
+        if answer == IDYES:
+            root.withdraw()
+            notify("Running in Tray", "Bot is still running. Right-click the tray icon to exit.")
+        elif answer == IDNO:
+            bot_stop_event.set()
+            stop_tray_icon()
+            root.destroy()
+            os._exit(0)
 
     root.protocol("WM_DELETE_WINDOW", _on_close)
     root.mainloop()
