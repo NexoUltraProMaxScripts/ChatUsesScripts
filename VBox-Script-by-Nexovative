@@ -201,7 +201,7 @@ def _create_splash():
 
     _splash_root = splash
     splash.lift()
-    splash.attributes("-topmost", True)
+    # splash.attributes("-topmost", True)
     splash.update()
 
 def _update_splash(pct, label=None):
