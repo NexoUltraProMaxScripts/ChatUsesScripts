@@ -44,11 +44,11 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & AUTO-UPDATE =========================
-VERSION = "29.1.0"   # increment this with every release
+VERSION = "29.2.0"   # increment this with every release
 
-# GitHub paths
-# GITHUB_VERSION_URL
-# GITHUB_SCRIPT_URL
+# Replace these two URLs with your own GitHub repo paths.
+# GITHUB_VERSION_URL  → raw URL of version.json in your repo
+# GITHUB_SCRIPT_URL   → raw URL of the main script file in your repo
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/NexoUltraProMaxScripts/ChatUsesScripts/refs/heads/main/version.json"
 GITHUB_SCRIPT_URL  = "https://raw.githubusercontent.com/NexoUltraProMaxScripts/ChatUsesScripts/refs/heads/main/VBox-Script-by-Nexovative"
 
@@ -620,7 +620,7 @@ VM_NAME  = ""
 
 # ========================= EVENT LOG =========================
 EVENT_LOG_FILE = "event_log.json"
-_event_log: list = []          # list of dicts written at runtime
+_event_log = []                # list of dicts written at runtime
 _event_log_lock = threading.Lock()
 
 def _append_event(event_type: str, username: str, detail: str = ""):
@@ -741,7 +741,7 @@ MULTI_STREAM_CONFIG_FILE = "multi_stream_config.json"
 MULTI_STREAM_CONFIG = {
     "video_ids": [],       # list of YouTube video IDs to monitor simultaneously
 }
-_multi_stream_bots: list = []   # list of running YouTubeChatBot instances (secondary streams)
+_multi_stream_bots = []        # list of running YouTubeChatBotSecondary instances
 
 def load_multi_stream_config():
     global MULTI_STREAM_CONFIG
@@ -1119,17 +1119,9 @@ OBS_CONFIG = {
     "host":     "localhost",
     "port":     4455,
     "password": "",
-    # Scene triggers — keyed by event name, value is scene name ("" = disabled)
-    "triggers": {
-        "bot_start":    "",
-        "bot_stop":     "",
-        "os_switch":    "",
-        "revert_start": "",
-        "revert_done":  "",
-        "restart":      "",
-    },
+    # Scene triggers — {event_key: scene_name}  fully user-defined
+    "triggers": {},
     # Per-OS scenes — {trigger_key: obs_scene_name}
-    # e.g. {"win7": "Windows 7 Scene", "win10": "Windows 10 Scene"}
     "os_scenes": {}
 }
 
@@ -2443,6 +2435,10 @@ class UltraBotGUI:
         self._editing_cmd  = None   # trigger key being edited
         self._step_items   = []     # list of {"action":..,"args":..} dicts
 
+        # Unsaved-changes guard: set of tab indices that have unsaved changes
+        self._unsaved_tabs = set()
+        self._current_tab  = 0      # index of the currently visible tab
+
         load_appearance_config()
         self._build_styles()
         load_os_voting_config()
@@ -2694,9 +2690,49 @@ class UltraBotGUI:
         self._build_multi_stream_tab(tab12)
         self._build_scheduler_tab(tab13)
         self._sync_main_vm_lock()
+        self._nb = nb   # store reference for unsaved-changes guard
         self._bind_context_menus()   # attach right-click menus to all Entry/Text widgets
         self._stats_update_job = None
         self.root.after(1000, self._refresh_stats_display)
+
+        # ── Unsaved-changes guard: intercept tab switches ──
+        # Tab indices that can have unsaved state (matched by name text prefix):
+        # 1=Commands, 3=OS Voting, 5=OBS, 9=Permissions, 10=Sound&TTS,
+        # 11=Multi-Stream, 12=Scheduler
+        def _on_tab_changed(event):
+            try:
+                new_idx = nb.index(nb.select())
+                old_idx = self._current_tab
+                if new_idx == old_idx:
+                    return
+                if old_idx in self._unsaved_tabs:
+                    tab_name = nb.tab(old_idx, "text")
+                    answer = messagebox.askyesno(
+                        "Unsaved Changes",
+                        f"The tab  \"{tab_name}\"  has unsaved changes.\n\n"
+                        "Save before switching tabs?"
+                    )
+                    if answer:
+                        # Route to the correct save method based on old tab index
+                        save_map = {
+                            1:  self._save_cmd,
+                            3:  self._save_os_voting_config,
+                            5:  self._obs_save,
+                            9:  self._save_permissions,
+                            10: self._save_sound_config,
+                            11: self._ms_save,
+                            12: self._sched_save,
+                        }
+                        save_fn = save_map.get(old_idx)
+                        if save_fn:
+                            save_fn()
+                    # Clear the dirty flag regardless of the user's choice
+                    self._unsaved_tabs.discard(old_idx)
+                self._current_tab = new_idx
+            except Exception:
+                pass
+
+        nb.bind("<<NotebookTabChanged>>", _on_tab_changed)
 
     # ──────────────── TAB 1 : MAIN ────────────────
     def _build_main_tab(self, parent):
@@ -2971,8 +3007,8 @@ class UltraBotGUI:
                    command=self._add_step).pack(side="left")
 
         # Hint label
-        hint = ("combo: win+r  |  send: notepad.exe  |  wait: 1  |  "
-                "send: hello  |  key: enter  |  click / rclick")
+        hint = ("combo: win+r  |  send: notepad.exe  |  wait: 500 (ms)  |  "
+                "sendenter: hello  |  key: enter  |  click / rclick")
         tk.Label(right, text=hint, bg=self.BG2, fg=self.TEXTDIM,
                  font=("Segoe UI",8), wraplength=420, justify="left"
                  ).pack(anchor="w", pady=(0,6))
@@ -2984,6 +3020,9 @@ class UltraBotGUI:
                    command=self._save_cmd).pack(side="left", padx=(0,8))
         ttk.Button(save_row, text="▶  Test Now", style="Accent.TButton",
                    command=self._test_cmd).pack(side="left")
+
+        # Track unsaved changes (tab index 1)
+        self._trace_dirty(1, self._trig_var, self._chain_var, self._action_var, self._args_var)
 
     # ──────────────── TAB 3 : VM CONTROLS ────────────────
     def _build_vm_controls_tab(self, parent):
@@ -3161,6 +3200,9 @@ class UltraBotGUI:
 
         self._refresh_os_vm_lists()
         self._set_os_rows_enabled(OS_VOTING_ENABLED)
+        # Track unsaved changes (tab index 3)
+        self._trace_dirty(3, self._os_voting_var,
+                          *self._os_name_vars, *self._os_trigger_vars, *self._os_vm_vars)
 
     def _refresh_os_vm_lists(self):
         vms = get_vm_list()
@@ -3385,8 +3427,10 @@ class UltraBotGUI:
         # Rebuild
         self._build_styles()
         self.root.configure(bg=self.BG)
-        self._editing_cmd = None
-        self._step_items  = []
+        self._editing_cmd  = None
+        self._step_items   = []
+        self._unsaved_tabs = set()
+        self._current_tab  = 0
         self._build_ui()
 
         # Restore tab — search recursively again after rebuild
@@ -3428,15 +3472,6 @@ class UltraBotGUI:
     # ──────────────── TAB 6 : OBS ────────────────
     def _build_obs_tab(self, parent):
         parent.configure(style="TFrame")
-
-        TRIGGER_LABELS = {
-            "bot_start":    "Bot started",
-            "bot_stop":     "Bot stopped",
-            "os_switch":    "OS switched (voting)",
-            "revert_start": "Revert started",
-            "revert_done":  "Revert completed",
-            "restart":      "VM restarted",
-        }
 
         # ── Scrollable canvas wrapper ──
         canvas    = tk.Canvas(parent, bg=self.BG, highlightthickness=0)
@@ -3527,28 +3562,52 @@ class UltraBotGUI:
                  font=("Segoe UI", 9, "bold"))
         self._obs_status_label.pack(side="left", padx=(4, 0))
 
-        # ── Scene triggers ──
+        # ── Scene Triggers (dynamic) ──
         trigger_card = ttk.Frame(inner, style="Card.TFrame", padding=14)
         trigger_card.pack(fill="x", padx=16, pady=(0, 6))
         trigger_card.bind("<MouseWheel>", _on_wheel)
-        tk.Label(trigger_card, text="Scene Triggers",
+
+        trig_hdr_row = tk.Frame(trigger_card, bg=self.BG2)
+        trig_hdr_row.pack(fill="x", pady=(0, 6))
+        trig_hdr_row.bind("<MouseWheel>", _on_wheel)
+        tk.Label(trig_hdr_row, text="Scene Triggers",
                  bg=self.BG2, fg=self.TEXT,
-                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 4))
+                 font=("Segoe UI", 10, "bold")).pack(side="left")
+        ttk.Button(trig_hdr_row, text="＋ Add Trigger", style="Green.TButton",
+                   command=lambda: self._add_obs_trigger_row()).pack(side="right")
+
         tk.Label(trigger_card,
-                 text="Enter the exact OBS scene name to switch to when each event fires. Leave blank to skip.",
+                 text="Map any event key to an OBS scene.  "
+                      "Event key examples:  bot_start  bot_stop  restart  revert_start  "
+                      "revert_done  os_switch  ban  scheduler  — or any custom key you call via obs_trigger().",
                  bg=self.BG2, fg=self.TEXTDIM,
-                 font=("Segoe UI", 8)).pack(anchor="w", pady=(0, 10))
-        self._obs_trigger_vars = {}
-        for key, label in TRIGGER_LABELS.items():
-            row = tk.Frame(trigger_card, bg=self.BG2)
-            row.pack(fill="x", pady=3)
-            row.bind("<MouseWheel>", _on_wheel)
-            tk.Label(row, text=label, bg=self.BG2, fg=self.TEXT,
-                     font=("Segoe UI", 9), width=28, anchor="w").pack(side="left")
-            var = tk.StringVar(value=OBS_CONFIG["triggers"].get(key, ""))
-            self._obs_trigger_vars[key] = var
-            ttk.Entry(row, textvariable=var, width=30,
-                      font=("Segoe UI", 9)).pack(side="left", padx=(8, 0), ipady=2)
+                 font=("Segoe UI", 8), justify="left", wraplength=580).pack(
+                 anchor="w", pady=(0, 8))
+
+        col_hdr = tk.Frame(trigger_card, bg=self.BG2)
+        col_hdr.pack(fill="x", pady=(0, 2))
+        col_hdr.bind("<MouseWheel>", _on_wheel)
+        tk.Label(col_hdr, text="Event Key (select or type)",   bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8, "bold"), width=22, anchor="w").pack(side="left", padx=(0, 8))
+        tk.Label(col_hdr, text="OBS Scene Name", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8, "bold"), width=28, anchor="w").pack(side="left")
+
+        self._obs_trigger_rows       = []
+        self._obs_trigger_rows_frame = tk.Frame(trigger_card, bg=self.BG2)
+        self._obs_trigger_rows_frame.pack(fill="x")
+        self._obs_trigger_rows_frame.bind("<MouseWheel>", _on_wheel)
+        self._obs_wheel_fn_trigger = _on_wheel
+
+        # Pre-fill from saved config
+        saved_triggers = OBS_CONFIG.get("triggers", {})
+        if saved_triggers:
+            for ev_key, scene_name in saved_triggers.items():
+                self._add_obs_trigger_row(ev_key, scene_name)
+        else:
+            # Populate sensible defaults on first use
+            for ev_key in ("bot_start", "bot_stop", "restart",
+                           "revert_start", "revert_done", "os_switch"):
+                self._add_obs_trigger_row(ev_key, "")
 
         # ── Per-OS scenes ──
         os_scene_card = ttk.Frame(inner, style="Card.TFrame", padding=14)
@@ -3604,6 +3663,43 @@ class UltraBotGUI:
         ttk.Button(btn_row, text="💾 Save OBS Settings", style="Green.TButton",
                    command=self._obs_save).pack(side="left")
 
+        # Track unsaved changes (tab index 5)
+        self._trace_dirty(5, self._obs_enabled_var, self._obs_host_var,
+                          self._obs_port_var, self._obs_pass_var)
+
+    def _add_obs_trigger_row(self, event_key="", scene=""):
+        KNOWN_EVENT_KEYS = [
+            "bot_start",
+            "bot_stop",
+            "restart",
+            "revert_start",
+            "revert_done",
+            "os_switch",
+            "ban",
+            "scheduler",
+        ]
+        row = tk.Frame(self._obs_trigger_rows_frame, bg=self.BG2)
+        row.pack(fill="x", pady=2)
+        if hasattr(self, '_obs_wheel_fn_trigger'):
+            row.bind("<MouseWheel>", self._obs_wheel_fn_trigger)
+        key_var   = tk.StringVar(value=event_key)
+        scene_var = tk.StringVar(value=scene)
+        key_cb = ttk.Combobox(row, textvariable=key_var,
+                              values=KNOWN_EVENT_KEYS,
+                              width=20, font=("Segoe UI Mono", 9))
+        key_cb.pack(side="left", padx=(0, 8), ipady=2)
+        key_cb.bind("<MouseWheel>", lambda e: "break")  # prevent scroll hijack
+        ttk.Entry(row, textvariable=scene_var, width=28,
+                  font=("Segoe UI", 9)).pack(side="left", ipady=2)
+        entry_pair = (key_var, scene_var)
+        ttk.Button(row, text="✕", style="Dim.TButton", width=2,
+                   command=lambda r=row, p=entry_pair: (
+                       r.destroy(),
+                       self._obs_trigger_rows.remove(p)
+                       if p in self._obs_trigger_rows else None
+                   )).pack(side="left", padx=(6, 0))
+        self._obs_trigger_rows.append(entry_pair)
+
     def _add_obs_os_row(self, name="", trigger="", scene=""):
         row = tk.Frame(self._obs_os_rows_frame, bg=self.BG2)
         row.pack(fill="x", pady=2)
@@ -3652,8 +3748,14 @@ class UltraBotGUI:
         OBS_CONFIG["host"]     = self._obs_host_var.get().strip()
         OBS_CONFIG["port"]     = int(self._obs_port_var.get().strip() or 4455)
         OBS_CONFIG["password"] = self._obs_pass_var.get()
-        for key, var in self._obs_trigger_vars.items():
-            OBS_CONFIG["triggers"][key] = var.get().strip()
+        # Save dynamic scene triggers
+        triggers = {}
+        for key_var, scene_var in self._obs_trigger_rows:
+            key   = key_var.get().strip()
+            scene = scene_var.get().strip()
+            if key and scene:
+                triggers[key] = scene
+        OBS_CONFIG["triggers"] = triggers
         # Save per-OS scenes
         os_scenes = {}
         for name_var, trig_var, scene_var in self._obs_os_rows:
@@ -3663,6 +3765,7 @@ class UltraBotGUI:
                 os_scenes[trig] = scene
         OBS_CONFIG["os_scenes"] = os_scenes
         save_obs_config()
+        self._clear_dirty(5)
         messagebox.showinfo("Saved", "OBS settings saved.")
 
     def _on_auto_start_toggle(self):
@@ -3713,6 +3816,7 @@ class UltraBotGUI:
         OS_VOTING_ENABLED = enabled
         OS_LIST = new_list
         save_os_voting_config()
+        self._clear_dirty(3)
         self._set_os_rows_enabled(enabled)
         self._sync_main_vm_lock()
         self._log(f"[OSVoting] Saved. Enabled={enabled}, entries={len(new_list)}")
@@ -3830,6 +3934,24 @@ class UltraBotGUI:
         self._console.insert('end', f"[{ts}] {msg}\n")
         self._console.see('end')
         self._console.configure(state='disabled')
+
+    def _mark_dirty(self, tab_idx):
+        """Mark a tab as having unsaved changes."""
+        self._unsaved_tabs.add(tab_idx)
+
+    def _clear_dirty(self, tab_idx):
+        """Clear the unsaved-changes flag for a tab (called after successful save)."""
+        self._unsaved_tabs.discard(tab_idx)
+
+    def _trace_dirty(self, tab_idx, *vars_):
+        """Attach write-traces to tkinter variables so any change marks the tab dirty."""
+        def _cb(*_args, _idx=tab_idx):
+            self._mark_dirty(_idx)
+        for v in vars_:
+            try:
+                v.trace_add("write", _cb)
+            except Exception:
+                pass
 
     def _set_status(self, text, color):
         self._status_dot.configure(text=f"⬤  {text}", fg=color)
@@ -3977,6 +4099,7 @@ class UltraBotGUI:
         finally:
             self._bot_instance = None
             self._bot_running = False
+            _multi_stream_bots.clear()
             self.root.after(0, lambda: self._set_status("Stopped", self.RED))
 
     def _minimize_to_tray(self):
@@ -4278,7 +4401,7 @@ class UltraBotGUI:
         # Manual ban row
         ban_input = tk.Frame(left, bg=self.BG2)
         ban_input.pack(fill="x", pady=(8, 4))
-        tk.Label(ban_input, text="Username:", bg=self.BG2, fg=self.TEXTDIM,
+        tk.Label(ban_input, text="Username (@ optional):", bg=self.BG2, fg=self.TEXTDIM,
                  font=("Segoe UI", 9)).pack(side="left", padx=(0, 6))
         self._ban_user_var = tk.StringVar()
         ttk.Entry(ban_input, textvariable=self._ban_user_var,
@@ -4332,9 +4455,11 @@ class UltraBotGUI:
 
         wl_input = tk.Frame(wl_card, bg=self.BG2)
         wl_input.pack(fill="x", pady=(6, 0))
+        tk.Label(wl_input, text="@ optional:", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8)).pack(side="left", padx=(0, 4))
         self._wl_user_var = tk.StringVar()
         ttk.Entry(wl_input, textvariable=self._wl_user_var,
-                  width=20, font=("Segoe UI", 10)).pack(side="left", ipady=3, padx=(0, 6))
+                  width=18, font=("Segoe UI", 10)).pack(side="left", ipady=3, padx=(0, 6))
         ttk.Button(wl_input, text="＋ Add", style="Green.TButton",
                    command=self._wl_add).pack(side="left", padx=(0, 4))
         ttk.Button(wl_input, text="✕ Remove", style="Red.TButton",
@@ -4366,10 +4491,12 @@ class UltraBotGUI:
 
         vip_input = tk.Frame(vip_card, bg=self.BG2)
         vip_input.pack(fill="x", pady=(6, 0))
+        tk.Label(vip_input, text="@ optional:", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8)).pack(side="left", padx=(0, 4))
         self._vip_user_var  = tk.StringVar()
         self._vip_votes_var = tk.StringVar(value="1")
         ttk.Entry(vip_input, textvariable=self._vip_user_var,
-                  width=16, font=("Segoe UI", 10)).pack(side="left", ipady=3, padx=(0, 4))
+                  width=14, font=("Segoe UI", 10)).pack(side="left", ipady=3, padx=(0, 4))
         tk.Label(vip_input, text="Votes:", bg=self.BG2, fg=self.TEXTDIM,
                  font=("Segoe UI", 9)).pack(side="left", padx=(0, 4))
         ttk.Entry(vip_input, textvariable=self._vip_votes_var,
@@ -4400,7 +4527,7 @@ class UltraBotGUI:
         self._ban_refresh_job = self.root.after(5000, self._refresh_ban_list)
 
     def _gui_ban_user(self):
-        username = self._ban_user_var.get().strip().lower()
+        username = self._ban_user_var.get().strip().lstrip('@').lower()
         if not username:
             messagebox.showwarning("Missing", "Enter a username to ban.")
             return
@@ -4418,7 +4545,7 @@ class UltraBotGUI:
         sel = self._ban_tree.selection()
         if not sel:
             # also try the typed field
-            username = self._ban_user_var.get().strip().lower()
+            username = self._ban_user_var.get().strip().lstrip('@').lower()
             if username and username in banned_users:
                 del banned_users[username]
                 self._log(f"[UserMgmt] Unbanned '{username}'.")
@@ -4446,7 +4573,7 @@ class UltraBotGUI:
             self._wl_listbox.insert("end", u)
 
     def _wl_add(self):
-        username = self._wl_user_var.get().strip().lower()
+        username = self._wl_user_var.get().strip().lstrip('@').lower()
         if not username:
             return
         whitelist_users.add(username)
@@ -4479,7 +4606,7 @@ class UltraBotGUI:
         self._vip_tree.tag_configure("odd",  background=self.BG2)
 
     def _vip_add(self):
-        username = self._vip_user_var.get().strip().lower()
+        username = self._vip_user_var.get().strip().lstrip('@').lower()
         if not username:
             return
         try:
@@ -4505,7 +4632,7 @@ class UltraBotGUI:
     # ──────────────── Chain Parser ────────────────
     def _parse_chain_input(self):
         """
-        Parses a chat-style chain like '!combo win+r !wait 1 !send notepad.exe'
+        Parses a chat-style chain like '!combo win+r !wait 800 !send notepad.exe'
         into individual steps. Replaces the current step list (does not append).
         """
         raw = self._chain_var.get().strip()
@@ -4529,6 +4656,7 @@ class UltraBotGUI:
         self._step_items = steps
         self._refresh_step_tree()
         self._chain_var.set("")   # clear
+        self._mark_dirty(1)
         self._log(f"[ChainParse] {len(steps)} step(s) created: "
                   + "  →  ".join(f"{s['action']}({s['args']})" for s in steps))
 
@@ -4545,6 +4673,7 @@ class UltraBotGUI:
         self._trig_var.set(trigger)
         self._step_items  = list(custom_commands.get(trigger, []))
         self._refresh_step_tree()
+        self._clear_dirty(1)
 
     def _refresh_step_tree(self):
         for row in self._step_tree.get_children():
@@ -4565,6 +4694,7 @@ class UltraBotGUI:
         self._step_items.append({"action": action, "args": args})
         self._refresh_step_tree()
         self._args_var.set("")
+        self._mark_dirty(1)
 
     def _selected_step_idx(self):
         sel = self._step_tree.selection()
@@ -4579,6 +4709,7 @@ class UltraBotGUI:
             self._step_items[idx], self._step_items[idx-1]
         self._refresh_step_tree()
         self._step_tree.selection_set(self._step_tree.get_children()[idx-1])
+        self._mark_dirty(1)
 
     def _step_down(self):
         idx = self._selected_step_idx()
@@ -4587,12 +4718,14 @@ class UltraBotGUI:
             self._step_items[idx+1], self._step_items[idx]
         self._refresh_step_tree()
         self._step_tree.selection_set(self._step_tree.get_children()[idx+1])
+        self._mark_dirty(1)
 
     def _step_remove(self):
         idx = self._selected_step_idx()
         if idx is None: return
         self._step_items.pop(idx)
         self._refresh_step_tree()
+        self._mark_dirty(1)
 
     def _new_cmd(self):
         self._editing_cmd = None
@@ -4600,6 +4733,7 @@ class UltraBotGUI:
         self._step_items  = []
         self._refresh_step_tree()
         self._cmd_listbox.selection_clear(0, 'end')
+        self._clear_dirty(1)
 
     def _save_cmd(self):
         trigger = self._trig_var.get().strip()
@@ -4609,6 +4743,7 @@ class UltraBotGUI:
             return
         custom_commands[trigger] = list(self._step_items)
         save_custom_commands()
+        self._clear_dirty(1)
         self._refresh_cmd_list()
         self._log(f"[CustomCmd] Saved '{trigger}' with {len(self._step_items)} step(s).")
 
@@ -4621,6 +4756,7 @@ class UltraBotGUI:
         if messagebox.askyesno("Delete", f"Delete '{trigger}'?"):
             del custom_commands[trigger]
             save_custom_commands()
+            self._clear_dirty(1)
             self._refresh_cmd_list()
             self._new_cmd()
             self._log(f"[CustomCmd] Deleted '{trigger}'.")
@@ -4797,6 +4933,9 @@ class UltraBotGUI:
                                      font=("Segoe UI", 9))
         self._perm_status.pack(anchor="w", padx=16, pady=(6, 0))
 
+        # Track unsaved changes (tab index 9)
+        self._trace_dirty(9, *self._perm_vars.values())
+
     def _save_permissions(self):
         for key, var in self._perm_vars.items():
             try:
@@ -4804,6 +4943,7 @@ class UltraBotGUI:
             except ValueError:
                 pass
         save_permissions_config()
+        self._clear_dirty(9)
         self._perm_status.configure(
             text=f"Saved — restart:{PERMISSIONS_CONFIG['restart_votes']}  "
                  f"revert:{PERMISSIONS_CONFIG['revert_votes']}  "
@@ -4930,6 +5070,10 @@ class UltraBotGUI:
         ttk.Button(btn_row, text="💾 Save Sound & TTS Config", style="Green.TButton",
                    command=self._save_sound_config).pack(side="left")
 
+        # Track unsaved changes (tab index 10)
+        self._trace_dirty(10, self._tts_enabled_var, self._tts_rate_var, self._tts_vol_var,
+                          *self._sound_vars.values())
+
     def _test_tts(self):
         # Apply preview settings first
         SOUND_CONFIG["tts_enabled"] = True  # always test
@@ -4948,6 +5092,7 @@ class UltraBotGUI:
         global SUCCESS_SOUND_FILE
         SUCCESS_SOUND_FILE = SOUND_CONFIG.get("success_sound", "success.mp3")
         save_sound_config()
+        self._clear_dirty(10)
         self._log("[Sound] Config saved.")
 
     # ──────────────── TAB 12 : MULTI-STREAM ────────────────
@@ -5006,6 +5151,8 @@ class UltraBotGUI:
         self._ms_status.pack(anchor="w", padx=16, pady=(6, 0))
 
         self._ms_refresh_list()
+        # Track unsaved changes (tab index 11)
+        self._trace_dirty(11, self._ms_entry_var)
 
     def _ms_refresh_list(self):
         self._ms_listbox.delete(0, "end")
@@ -5023,6 +5170,7 @@ class UltraBotGUI:
             ids.append(vid)
         self._ms_entry_var.set("")
         self._ms_refresh_list()
+        self._mark_dirty(11)
 
     def _ms_remove(self):
         sel = self._ms_listbox.curselection()
@@ -5034,9 +5182,11 @@ class UltraBotGUI:
         except ValueError:
             pass
         self._ms_refresh_list()
+        self._mark_dirty(11)
 
     def _ms_save(self):
         save_multi_stream_config()
+        self._clear_dirty(11)
         self._ms_status.configure(
             text=f"Saved. {len(MULTI_STREAM_CONFIG.get('video_ids', []))} extra stream(s). "
                  f"Restart the bot to apply.")
@@ -5171,6 +5321,10 @@ class UltraBotGUI:
                    command=self._sched_save).pack(fill="x", pady=(6, 0))
 
         self._sched_refresh_tree()
+        # Track unsaved changes (tab index 12)
+        self._trace_dirty(12, self._sched_label_var, self._sched_action_var,
+                          self._sched_hour_var, self._sched_minute_var,
+                          self._sched_enabled_var, *self._sched_day_vars)
 
     def _sched_update_status(self):
         if SCHEDULER_CONFIG.get("enabled"):
@@ -5181,6 +5335,7 @@ class UltraBotGUI:
     def _sched_toggle(self):
         SCHEDULER_CONFIG["enabled"] = self._sched_enabled_var.get()
         save_scheduler_config()
+        self._clear_dirty(12)
         self._sched_update_status()
         self._log(f"[Scheduler] {'Enabled' if SCHEDULER_CONFIG['enabled'] else 'Disabled'}.")
 
@@ -5235,6 +5390,7 @@ class UltraBotGUI:
             if t.get("label") == label:
                 t.update({"action": action, "hour": hour, "minute": minute, "days": days})
                 self._sched_refresh_tree()
+                self._mark_dirty(12)
                 self._log(f"[Scheduler] Updated task '{label}'.")
                 return
         import uuid
@@ -5249,6 +5405,7 @@ class UltraBotGUI:
         })
         self._sched_refresh_tree()
         self._log(f"[Scheduler] Added task '{label}' → {action} at {hour:02d}:{minute:02d}.")
+        self._mark_dirty(12)
 
     def _sched_delete(self):
         sel = self._sched_tree.selection()
@@ -5260,9 +5417,11 @@ class UltraBotGUI:
             removed = tasks.pop(idx)
             self._log(f"[Scheduler] Deleted task '{removed.get('label', '')}'.")
             self._sched_refresh_tree()
+            self._mark_dirty(12)
 
     def _sched_save(self):
         save_scheduler_config()
+        self._clear_dirty(12)
         self._log("[Scheduler] Tasks saved.")
 
     # ──────────────── Welcome / User Guide ────────────────
@@ -5298,12 +5457,34 @@ class UltraBotGUI:
         body = tk.Frame(dlg, bg=self.BG)
         body.pack(fill="both", expand=True)
 
-        # Sidebar
-        sidebar = tk.Frame(body, bg=self.BG2, width=200)
-        sidebar.pack(side="left", fill="y")
-        sidebar.pack_propagate(False)
-        tk.Label(sidebar, text="CHAPTERS", bg=self.BG2, fg=self.TEXTDIM,
-                 font=("Segoe UI", 7, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
+        # Sidebar — scrollable canvas so all chapters fit
+        sidebar_outer = tk.Frame(body, bg=self.BG2, width=210)
+        sidebar_outer.pack(side="left", fill="y")
+        sidebar_outer.pack_propagate(False)
+
+        tk.Label(sidebar_outer, text="CHAPTERS", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w", padx=12, pady=(10, 2))
+
+        sb_canvas = tk.Canvas(sidebar_outer, bg=self.BG2, highlightthickness=0)
+        sb_scroll = ttk.Scrollbar(sidebar_outer, orient="vertical", command=sb_canvas.yview)
+        sb_canvas.configure(yscrollcommand=sb_scroll.set)
+        sb_scroll.pack(side="right", fill="y")
+        sb_canvas.pack(side="left", fill="both", expand=True)
+
+        sidebar = tk.Frame(sb_canvas, bg=self.BG2)
+        sidebar_window = sb_canvas.create_window((0, 0), window=sidebar, anchor="nw")
+
+        def _on_sidebar_configure(event):
+            sb_canvas.configure(scrollregion=sb_canvas.bbox("all"))
+            sb_canvas.itemconfig(sidebar_window, width=event.width)
+
+        sidebar.bind("<Configure>", lambda e: sb_canvas.configure(
+            scrollregion=sb_canvas.bbox("all")))
+        sb_canvas.bind("<Configure>", _on_sidebar_configure)
+        sb_canvas.bind("<MouseWheel>",
+            lambda e: sb_canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        sidebar.bind("<MouseWheel>",
+            lambda e: sb_canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
 
         # Right text area
         right_pane = tk.Frame(body, bg=self.BG)
@@ -5360,22 +5541,23 @@ class UltraBotGUI:
                 ("code", "  !move 500 300       →  move cursor to x=500 y=300"),
                 ("code", "  !scroll 3           →  scroll up 3 ticks  (negative = down)"),
                 ("code", "  !drag 100 200       →  click-drag by 100x 200y"),
-                ("h2",   "VM actions  (vote required by default)"),
-                ("code", "  !restart            →  reset the VM  (2 votes needed)"),
-                ("code", "  !revert             →  restore snapshot  (2 votes needed)"),
-                ("code", "  !ban @username      →  ban a user  (3 votes needed)"),
+                ("h2",   "VM actions  (vote required — thresholds set in 🔒 Permissions tab)"),
+                ("code", "  !restart            →  reset the VM"),
+                ("code", "  !revert             →  restore snapshot"),
+                ("code", "  !ban @username      →  ban a user by chat vote"),
                 ("h2",   "Misc"),
                 ("code", "  !votehelp           →  shows  'Commands in description!'  on overlay"),
                 ("code", "  !clearvotes         →  admin only: clear all active votes"),
                 ("tip",  "Tip: votes expire after 120 seconds if the threshold is not reached."),
                 ("tip",  "Tip: the stream owner (isChatOwner) always bypasses vote requirements."),
+                ("tip",  "Tip: vote thresholds are now fully configurable in the 🔒 Permissions tab — no code editing needed."),
             ]),
             ("⚙️  Command Builder", [
                 ("h1",   "⚙️  Command Builder"),
                 ("body", "Create custom chat commands — no coding required."),
                 ("h2",   "Quick Chain Input  (fastest)"),
                 ("body", "Type a full sequence in chat syntax in the chain field, then press  ⇨ Parse Steps:"),
-                ("code", "  !combo win+r !wait 1 !send notepad.exe !key enter"),
+                ("code", "  !combo win+r !wait 800 !send notepad.exe !key enter"),
                 ("body", "This generates a 4-step command instantly."),
                 ("h2",   "Step-by-step"),
                 ("body", "1.  Click  ＋ New  to start fresh."),
@@ -5426,6 +5608,7 @@ class UltraBotGUI:
                 ("body", "Top 15 most used commands and top 15 most active users, sorted by count."),
                 ("h2",   "Reset session"),
                 ("body", "Click  🗑 Reset Session Stats  to wipe session counters and both leaderboards. The all-time total command count is NOT reset."),
+                ("tip",  "Tip: for a full history of who did what and when, see the 📋 Event Log tab."),
             ]),
             ("🚫  User Management", [
                 ("h1",   "🚫  User Management"),
@@ -5441,6 +5624,7 @@ class UltraBotGUI:
                 ("body", "VIPs need fewer votes to trigger restart / revert.  Set  Votes needed = 1  to give a user instant-action power (same as stream owner)."),
                 ("code", "  Example: add  nexoraWN  as VIP with 1 vote"),
                 ("code", "           →  they can solo-restart the VM without other viewers voting"),
+                ("tip",  "Tip: to change how many votes everyone needs (not just VIPs), use the 🔒 Permissions tab."),
             ]),
             ("🎨  Appearance", [
                 ("h1",   "🎨  Appearance & Themes"),
@@ -5459,15 +5643,113 @@ class UltraBotGUI:
                 ("body", "1.  In OBS: Tools → WebSocket Server Settings → Enable WebSocket.  Set a port & password."),
                 ("body", "2.  In the OBS tab: enter  host  (usually localhost),  port,  password."),
                 ("body", "3.  Click  Connect — the dot turns green on success."),
-                ("h2",   "Scene triggers"),
-                ("code", "  bot_start     →  scene to switch to when the bot starts"),
-                ("code", "  bot_stop      →  scene when the bot stops"),
-                ("code", "  os_switch     →  scene when OS voting fires"),
-                ("code", "  revert_start  →  scene when a revert begins"),
-                ("code", "  revert_done   →  scene when revert finishes"),
-                ("code", "  restart       →  scene when VM is restarted"),
+                ("h2",   "Scene Triggers"),
+                ("body", "Click  ＋ Add Trigger  to add a new row.  Each row maps an event key to an exact OBS scene name."),
+                ("code", "  Event Key        →  OBS Scene Name"),
+                ("code", "  bot_start        →  Live Scene"),
+                ("code", "  bot_stop         →  BRB Scene"),
+                ("code", "  restart          →  Restart Scene"),
+                ("code", "  revert_start     →  Loading Scene"),
+                ("code", "  revert_done      →  Live Scene"),
+                ("code", "  os_switch        →  OS Switch Scene"),
+                ("code", "  ban              →  Ban Alert Scene"),
+                ("code", "  scheduler        →  Maintenance Scene"),
+                ("body", "You can use any event key — including custom ones you fire via  obs_trigger()  in your own commands.  Leave a row's scene field empty to disable that trigger.  Click  ✕  to remove a row entirely."),
+                ("tip",  "Tip: event keys are case-sensitive.  Use lowercase with underscores, e.g.  revert_done."),
                 ("h2",   "Per-OS scenes"),
                 ("body", "Each OS entry in the OS Voting tab can have its own OBS scene that activates automatically when that OS is selected."),
+            ]),
+            ("📋  Event Log", [
+                ("h1",   "📋  Event Log / History"),
+                ("body", "A full audit trail of everything that happens while the bot runs — commands, votes, bans, restarts, reverts, OS switches, and scheduled actions."),
+                ("h2",   "Filtering"),
+                ("body", "Use the  Type  dropdown to show only a specific category:"),
+                ("code", "  ALL         →  everything"),
+                ("code", "  COMMAND     →  every chat command dispatched"),
+                ("code", "  RESTART     →  VM restart events"),
+                ("code", "  REVERT      →  VM revert / snapshot restore events"),
+                ("code", "  OS_SWITCH   →  OS voting switch events"),
+                ("code", "  BAN_VOTE    →  individual ban vote casts"),
+                ("code", "  BAN         →  confirmed bans (threshold reached)"),
+                ("code", "  SCHEDULER   →  actions fired by the scheduler"),
+                ("body", "Use the  User  field to filter by a specific viewer's username.  Click  🔍 Apply Filter  or  🔄 Refresh  to update the table."),
+                ("h2",   "Export"),
+                ("body", "Click  💾 Export CSV  to save all log entries to a .csv file you can open in Excel or any spreadsheet app."),
+                ("h2",   "Storage"),
+                ("body", "The log is kept in memory (last 5 000 entries) and persisted to  event_log.json  in the bot folder.  It survives restarts."),
+                ("tip",  "Tip: the table shows the 1 000 most recent matching entries, newest first."),
+            ]),
+            ("🔒  Permissions", [
+                ("h1",   "🔒  Permissions"),
+                ("body", "Set how many chat votes are required for each action — directly from the GUI, no code editing needed."),
+                ("h2",   "Available settings"),
+                ("code", "  Restart votes  →  votes needed to reset the VM         (default: 2)"),
+                ("code", "  Revert votes   →  votes needed to restore the snapshot  (default: 2)"),
+                ("code", "  Ban votes      →  votes needed to ban a viewer          (default: 3)"),
+                ("h2",   "How to change"),
+                ("body", "1.  Go to the  🔒 Permissions  tab."),
+                ("body", "2.  Use the spinboxes to set the desired vote count for each action."),
+                ("body", "3.  Click  💾 Save Permissions.  Changes take effect immediately — no bot restart needed."),
+                ("h2",   "Interaction with VIPs"),
+                ("body", "VIP users (configured in 🚫 User Management) can have a personal lower threshold that overrides the global value here.  The stream owner always bypasses voting entirely."),
+                ("tip",  "Tip: set restart/revert to 1 to allow any single viewer to trigger them instantly."),
+                ("tip",  "Tip: settings are saved to  permissions_config.json."),
+            ]),
+            ("🔊  Sound & TTS", [
+                ("h1",   "🔊  Sound & TTS"),
+                ("body", "Configure which sound file plays for each bot event, and fine-tune the Text-to-Speech voice."),
+                ("h2",   "Per-event sound files"),
+                ("body", "Each event has its own file field.  Leave a field empty to silence that event."),
+                ("code", "  Success (default)  →  plays on any successful action"),
+                ("code", "  VM Restart         →  plays when a restart completes"),
+                ("code", "  VM Revert          →  plays when a snapshot restore completes"),
+                ("code", "  User Banned        →  plays when a ban vote passes"),
+                ("code", "  OS Switch          →  plays when the active OS changes"),
+                ("body", "Click  📂  next to a field to browse for a file.  Click  ▶ Test  to preview the sound immediately."),
+                ("h2",   "Text-to-Speech  (SAPI)"),
+                ("body", "The bot uses Windows SAPI to announce events like  'Restarting Virtual Machine'."),
+                ("code", "  TTS Enabled   →  toggle announcements on/off"),
+                ("code", "  Speed         →  words per minute  (50 – 400, default 150)"),
+                ("code", "  Volume        →  0 – 100  (default 100)"),
+                ("body", "Type a test phrase and click  🗣 Test TTS  to hear the current settings live."),
+                ("body", "Click  💾 Save Sound & TTS Config  to persist all settings to  sound_config.json."),
+                ("tip",  "Tip: .mp3 and .wav files both work.  Use relative paths (e.g.  success.mp3) or full absolute paths."),
+            ]),
+            ("🌐  Multi-Stream", [
+                ("h1",   "🌐  Multi-Stream"),
+                ("body", "Listen to multiple YouTube live streams simultaneously — useful for backup streams or running the bot across multiple channels at once."),
+                ("h2",   "How it works"),
+                ("body", "The  Main tab  Video ID is the primary stream.  Any IDs added here are secondary streams.  All streams share the same command handling: keyboard, mouse, and custom commands all work from any stream."),
+                ("tip",  "Tip: vote state (restart/revert/ban) is only tracked in the primary stream to avoid conflicts."),
+                ("h2",   "Setup"),
+                ("body", "1.  Go to the  🌐 Multi-Stream  tab."),
+                ("body", "2.  Type an extra Video ID into the field and click  ＋ Add."),
+                ("body", "3.  Repeat for each additional stream."),
+                ("body", "4.  Click  💾 Save."),
+                ("body", "5.  (Re)start the bot — secondary listeners launch automatically."),
+                ("h2",   "Removing a stream"),
+                ("body", "Select the ID in the list and click  ✕ Remove Selected,  then save and restart the bot."),
+                ("tip",  "Tip: IDs are saved to  multi_stream_config.json.  The list persists across restarts."),
+            ]),
+            ("📅  Scheduler", [
+                ("h1",   "📅  Scheduler"),
+                ("body", "Automatically trigger a revert or restart at specific times — for example, reset the VM every night at 03:00 without being online."),
+                ("h2",   "Enable / Disable"),
+                ("body", "Tick  Enable Scheduler  at the top of the tab.  Tasks only fire when the scheduler is enabled AND the bot is running."),
+                ("h2",   "Creating a task"),
+                ("body", "Fill in the right-hand editor and click  ＋ Add / Update Task:"),
+                ("code", "  Label    →  a name for the task, e.g.  Nightly Revert"),
+                ("code", "  Action   →  revert  or  restart"),
+                ("code", "  Time     →  HH : MM  in 24-hour format  (e.g. 03:00)"),
+                ("code", "  Days     →  tick specific weekdays, or leave all unchecked for every day"),
+                ("h2",   "Editing an existing task"),
+                ("body", "Select it in the left list — the editor fills in.  Change the values and click  ＋ Add / Update Task  (same label = update)."),
+                ("h2",   "Deleting a task"),
+                ("body", "Select the task in the list and click  🗑 Delete.  Then  💾 Save All Scheduler Tasks."),
+                ("h2",   "How it fires"),
+                ("body", "The scheduler checks the time every 15 seconds.  Each task fires at most once per calendar day per label, so a bot restart mid-day will not double-fire a task that already ran today."),
+                ("tip",  "Tip: scheduled events are recorded in the 📋 Event Log so you can confirm they fired."),
+                ("tip",  "Tip: tasks are saved to  scheduler_config.json."),
             ]),
             ("⌨️  Keyboard Shortcuts", [
                 ("h1",   "⌨️  Keyboard Shortcuts"),
@@ -5513,6 +5795,8 @@ class UltraBotGUI:
                 command=lambda idx=i: _show_chapter(idx),
             )
             btn.pack(fill="x", pady=1)
+            btn.bind("<MouseWheel>",
+                lambda e: sb_canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
             _chapter_btns.append(btn)
 
         _show_chapter(0)
