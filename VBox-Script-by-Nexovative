@@ -44,7 +44,7 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & AUTO-UPDATE =========================
-VERSION = "28.5.0"   # increment this with every release
+VERSION = "29.0.0"   # increment this with every release
 
 # Replace these two URLs with your own GitHub repo paths.
 # GITHUB_VERSION_URL  → raw URL of version.json in your repo
@@ -201,7 +201,7 @@ def _create_splash():
 
     _splash_root = splash
     splash.lift()
-    # splash.attributes("-topmost", True)
+    # splash.attributes("-topmost", True)  # removed: caused splash to stay always on top
     splash.update()
 
 def _update_splash(pct, label=None):
@@ -771,10 +771,166 @@ restart_start_time = None
 revert_start_time  = None
 revert_in_progress   = False
 restart_in_progress  = False
+
+# ========================= STATISTICS =========================
+_stats = {
+    "total_commands":   0,
+    "session_commands": 0,
+    "os_switches":      0,
+    "reverts":          0,
+    "restarts":         0,
+    "bot_start_time":   None,   # set when bot starts
+    "command_counts":   {},     # {cmd_name: int}
+    "user_counts":      {},     # {username: int}
+}
+
+def _record_command(cmd_name: str, username: str):
+    """Call this every time a chat command is successfully dispatched."""
+    _stats["total_commands"]   += 1
+    _stats["session_commands"] += 1
+    _stats["command_counts"][cmd_name] = _stats["command_counts"].get(cmd_name, 0) + 1
+    _stats["user_counts"][username]    = _stats["user_counts"].get(username, 0) + 1
+
+def _reset_session_stats():
+    _stats["session_commands"] = 0
+    _stats["os_switches"]      = 0
+    _stats["reverts"]          = 0
+    _stats["restarts"]         = 0
+    _stats["bot_start_time"]   = time.time()
+
+# ========================= USER MANAGEMENT LISTS =========================
+USER_MGMT_FILE = "user_mgmt.json"
+whitelist_users = set()   # empty = disabled; non-empty = only these users can use commands
+vip_users       = {}      # {username: {"votes_needed": int}}  (e.g. 1 = can solo-vote)
+
+def load_user_mgmt():
+    global whitelist_users, vip_users
+    try:
+        if os.path.exists(USER_MGMT_FILE):
+            with open(USER_MGMT_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            whitelist_users = set(u.lower() for u in data.get("whitelist", []))
+            vip_users       = {k.lower(): v for k, v in data.get("vip", {}).items()}
+            print(f"[UserMgmt] Loaded. whitelist={len(whitelist_users)}, vip={len(vip_users)}")
+    except Exception as e:
+        print(f"[UserMgmt] Load error: {e}")
+
+def save_user_mgmt():
+    try:
+        with open(USER_MGMT_FILE, "w", encoding="utf-8") as f:
+            json.dump({"whitelist": sorted(whitelist_users),
+                       "vip":       vip_users}, f, indent=2, ensure_ascii=False)
+        print("[UserMgmt] Saved.")
+    except Exception as e:
+        print(f"[UserMgmt] Save error: {e}")
 AUTO_START_ENABLED = True   # if False, watchdog_restart will not auto-revive a powered-off VM
 AUTO_START_CONFIG_FILE = "auto_start_config.json"
 
 APPEARANCE_CONFIG_FILE = "appearance_config.json"
+
+# ========================= OBS WEBSOCKET =========================
+OBS_CONFIG_FILE = "obs_config.json"
+
+try:
+    import obsws_python as obs
+    _OBS_LIB_OK = True
+except ImportError:
+    _OBS_LIB_OK = False
+    print("[OBS] obsws-python not installed. Run: pip install obsws-python")
+
+# Connection state
+_obs_client    = None   # obsws_python.ReqClient instance when connected
+_obs_connected = False
+
+# Default config
+OBS_CONFIG = {
+    "enabled":  False,
+    "host":     "localhost",
+    "port":     4455,
+    "password": "",
+    # Scene triggers — keyed by event name, value is scene name ("" = disabled)
+    "triggers": {
+        "bot_start":    "",
+        "bot_stop":     "",
+        "os_switch":    "",
+        "revert_start": "",
+        "revert_done":  "",
+        "restart":      "",
+    },
+    # Per-OS scenes — {trigger_key: obs_scene_name}
+    # e.g. {"win7": "Windows 7 Scene", "win10": "Windows 10 Scene"}
+    "os_scenes": {}
+}
+
+def load_obs_config():
+    global OBS_CONFIG
+    try:
+        if os.path.exists(OBS_CONFIG_FILE):
+            with open(OBS_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            OBS_CONFIG.update(data)
+            print("[OBS] Config loaded.")
+    except Exception as e:
+        print(f"[OBS] Load error: {e}")
+
+def save_obs_config():
+    try:
+        with open(OBS_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(OBS_CONFIG, f, indent=2)
+        print("[OBS] Config saved.")
+    except Exception as e:
+        print(f"[OBS] Save error: {e}")
+
+def obs_connect():
+    global _obs_client, _obs_connected
+    if not _OBS_LIB_OK:
+        print("[OBS] obsws-python not installed.")
+        return False
+    try:
+        _obs_client = obs.ReqClient(
+            host=OBS_CONFIG["host"],
+            port=int(OBS_CONFIG["port"]),
+            password=OBS_CONFIG["password"],
+            timeout=5
+        )
+        _obs_connected = True
+        print(f"[OBS] Connected to {OBS_CONFIG['host']}:{OBS_CONFIG['port']}")
+        return True
+    except Exception as e:
+        _obs_connected = False
+        _obs_client    = None
+        print(f"[OBS] Connection failed: {e}")
+        return False
+
+def obs_disconnect():
+    global _obs_client, _obs_connected
+    if _obs_client:
+        try: _obs_client.base_client.ws.close()
+        except Exception: pass
+        _obs_client = None
+    _obs_connected = False
+    print("[OBS] Disconnected.")
+
+def obs_set_scene(scene_name: str):
+    """Switch to the given OBS scene. No-op if not connected or scene is empty."""
+    if not _obs_connected or not _obs_client or not scene_name:
+        return
+    try:
+        _obs_client.set_current_program_scene(scene_name)
+        print(f"[OBS] Scene → '{scene_name}'")
+    except Exception as e:
+        print(f"[OBS] Scene switch error: {e}")
+        log_error("OBS", e)
+
+def obs_trigger(event: str):
+    """Fire a named trigger event if OBS is enabled and connected."""
+    if not OBS_CONFIG.get("enabled") or not _obs_connected:
+        return
+    scene = OBS_CONFIG["triggers"].get(event, "")
+    if scene:
+        threading.Thread(target=obs_set_scene, args=(scene,), daemon=True).start()
+
+
 
 # Built-in theme presets
 THEMES = {
@@ -1105,6 +1261,13 @@ def switch_os(target_entry, announce=True):
             update_status(f"Running {target_name}")
             play_success_sound()
             notify("OS Switched", f"Now running: {target_name}")
+            obs_trigger("os_switch")
+            _stats["os_switches"] += 1
+            # Per-OS scene: look up by trigger key
+            trig_key = target_entry.get("trigger", "").strip().lower().lstrip("!")
+            os_scene = OBS_CONFIG.get("os_scenes", {}).get(trig_key, "")
+            if os_scene:
+                threading.Thread(target=obs_set_scene, args=(os_scene,), daemon=True).start()
             save_os_voting_config()
             print(f"[OSVoting] Switched to '{target_name}' ({target_vm})")
         else:
@@ -1476,6 +1639,9 @@ class YouTubeChatBot:
                     if user in banned_users:
                         if time.time() < banned_users[user]: continue
                         else: del banned_users[user]
+                    # Whitelist check: if enabled and user not in list (and not owner), skip
+                    if whitelist_users and not is_owner and user not in whitelist_users:
+                        continue
                     active_users.add(c.author.name.strip())
                     print(f"[Chat] [{user}]: {msg}")
 
@@ -1485,6 +1651,7 @@ class YouTubeChatBot:
                             sub_parts = part.split(maxsplit=1)
                             cmd  = sub_parts[0].lower()
                             args = sub_parts[1] if len(sub_parts) > 1 else ""
+                            _record_command(cmd, user)
 
                             # ── Custom command check (first priority) ──
                             trigger = "!" + cmd
@@ -1589,6 +1756,10 @@ class YouTubeChatBot:
 
                             # Vote logic
                             required_votes = 2
+                            # VIP override: if this user is a VIP, lower the threshold
+                            if user in vip_users:
+                                required_votes = min(required_votes,
+                                    vip_users[user].get("votes_needed", required_votes))
                             current_time   = time.time()
 
                             if cmd in ['restart','restartvm']:
@@ -1643,6 +1814,8 @@ class YouTubeChatBot:
                                             restart_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
                                             update_status("Running"); play_success_sound()
                                             notify("VM Restarted", "Restart vote passed by chat.")
+                                            obs_trigger("restart")
+                                            _stats["restarts"] += 1
                                         else:
                                             update_status("Restart failed")
                                             log_error("Vote/restart", "Chat restart failed after retries", str(err))
@@ -1705,6 +1878,7 @@ class YouTubeChatBot:
                                     vote_revert.clear(); revert_start_time=None; active_users.clear()
                                     revert_in_progress = True
                                     update_status("Reverting...")
+                                    obs_trigger("revert_start")
                                     try:
                                         ok, err = retry_vbox(
                                             lambda: subprocess.run([VBOXMANAGE_PATH,'controlvm',VM_NAME,'poweroff'], check=True),
@@ -1724,6 +1898,8 @@ class YouTubeChatBot:
                                             revert_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
                                             update_status("Running"); play_success_sound()
                                             notify("VM Reverted", "Snapshot restored by chat vote.")
+                                            obs_trigger("revert_done")
+                                            _stats["reverts"] += 1
                                         else:
                                             failed = "snapshot" if not ok2 else "startvm"
                                             update_status("Revert failed")
@@ -1734,11 +1910,13 @@ class YouTubeChatBot:
                                         revert_in_progress = False
 
                             elif cmd == 'ban':
-                                if not args.startswith('@'): continue
-                                target_raw = args[1:].split()[0].strip()
+                                # Accept both "!ban @user" and "!ban user"
+                                raw_arg    = args.strip().lstrip('@').split()[0] if args.strip() else ""
+                                if not raw_arg: continue
+                                target_raw = raw_arg
                                 target     = target_raw.lower()
-                                active_clean = {t.strip().lstrip('@').lower() for t in active_users}
-                                if target not in active_clean: continue
+                                # Prevent self-ban and owner-ban
+                                if target == user: continue
                                 if target not in ban_votes:
                                     ban_votes[target] = {'voters': set(), 'start_time': current_time}
                                 if user in ban_votes[target]['voters']: continue
@@ -1746,6 +1924,7 @@ class YouTubeChatBot:
                                 cbv       = len(ban_votes[target]['voters'])
                                 remaining = max(0, VOTE_TIMEOUT-(current_time-ban_votes[target]['start_time']))
                                 update_ban_vote_display(target_raw, cbv, 3, remaining)
+                                print(f"[Ban] Vote for '{target}': {cbv}/3")
                                 if cbv >= 3:
                                     banned_users[target] = time.time() + BAN_DURATION
                                     update_status(f"@{target_raw} banned 30 min!")
@@ -1839,10 +2018,11 @@ class UltraBotGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("🤖 UltraBot Control Panel")
-        self.root.geometry("900x680")
-        self.root.minsize(760, 560)
         self.root.configure(bg=self.BG)
         self.root.resizable(True, True)
+        # Open maximized (windowed fullscreen — not borderless, still has taskbar/titlebar)
+        self.root.state("zoomed")
+        self.root.minsize(900, 600)
 
         self._bot_thread   = None
         self._bot_running  = False
@@ -1857,11 +2037,88 @@ class UltraBotGUI:
         self._build_styles()
         load_os_voting_config()
         load_auto_start_config()
+        load_obs_config()
         self._build_ui()
         load_custom_commands()
         self._refresh_cmd_list()
 
     # ── TTK Styles ──
+    def _make_context_menu(self, widget, is_text=False):
+        """Create and attach a right-click copy/paste/cut/select-all menu to a widget."""
+        MAX_PASTE_CHARS = 2000   # hard limit to prevent freeze on huge clipboard content
+
+        menu = tk.Menu(widget, tearoff=0,
+                       bg=self.BG2, fg=self.TEXT,
+                       activebackground=self.ACCENT,
+                       activeforeground="#fff",
+                       relief="flat", bd=0,
+                       font=("Segoe UI", 9))
+
+        def safe_paste():
+            try:
+                text = widget.clipboard_get()
+            except Exception:
+                return   # clipboard empty or unavailable
+            if len(text) > MAX_PASTE_CHARS:
+                text = text[:MAX_PASTE_CHARS]
+                messagebox.showwarning(
+                    "Paste Truncated",
+                    f"Clipboard content was too long and has been truncated to {MAX_PASTE_CHARS} characters."
+                )
+            try:
+                if is_text:
+                    try:
+                        widget.delete("sel.first", "sel.last")
+                    except Exception:
+                        pass
+                    widget.insert("insert", text)
+                else:
+                    try:
+                        sel_start = widget.index("sel.first")
+                        sel_end   = widget.index("sel.last")
+                        widget.delete(sel_start, sel_end)
+                    except Exception:
+                        pass
+                    widget.insert(tk.INSERT, text)
+            except Exception:
+                pass
+
+        menu.add_command(label="Cut",        command=lambda: widget.event_generate("<<Cut>>"))
+        menu.add_command(label="Copy",       command=lambda: widget.event_generate("<<Copy>>"))
+        menu.add_command(label="Paste",      command=safe_paste)
+        menu.add_separator()
+        menu.add_command(label="Select All", command=lambda: (
+            widget.tag_add("sel", "1.0", "end") if is_text
+            else (widget.select_range(0, "end"), widget.icursor("end"))
+        ))
+        menu.add_separator()
+        menu.add_command(label="Delete",     command=lambda: widget.event_generate("<<Clear>>"))
+
+        def show_menu(event):
+            try:
+                state    = str(widget.cget("state"))
+                editable = state not in ("disabled", "readonly")
+                for label in ("Cut", "Paste", "Delete"):
+                    menu.entryconfigure(label,
+                        state="normal" if editable else "disabled")
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+
+        widget.bind("<Button-3>", show_menu)
+
+    def _bind_context_menus(self, parent=None):
+        """Walk all widgets and attach right-click menus to Entry and Text widgets."""
+        if parent is None:
+            parent = self.root
+        for widget in parent.winfo_children():
+            wtype = widget.winfo_class()
+            if wtype in ("Entry", "TEntry"):
+                self._make_context_menu(widget, is_text=False)
+            elif wtype == "Text":
+                self._make_context_menu(widget, is_text=True)
+            self._bind_context_menus(widget)
+
     def _build_styles(self):
         fs = self.__class__._FONT_SIZE
         style = ttk.Style()
@@ -1916,28 +2173,101 @@ class UltraBotGUI:
                                     bg=self.BG2, fg=self.RED,
                                     font=("Segoe UI", 10, "bold"))
         self._status_dot.pack(side="right", padx=16)
+        ttk.Button(title_bar, text="❓ Help",
+                   style="Dim.TButton",
+                   command=lambda: self.show_welcome_guide(force=True)
+                   ).pack(side="right", padx=(0, 4), pady=6)
 
-        # Notebook
-        nb = ttk.Notebook(self.root)
-        nb.pack(fill="both", expand=True, padx=8, pady=8)
+        # ── Scrollable tab bar wrapper ──
+        # The ttk.Notebook tab strip doesn't scroll natively. We wrap it in a
+        # Canvas so the tab bar gets a horizontal scrollbar when tabs overflow,
+        # and we bind MouseWheel so users can cycle tabs with the scroll wheel.
+        nb_outer = tk.Frame(self.root, bg=self.BG)
+        nb_outer.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+
+        nb = ttk.Notebook(nb_outer)
+        nb.pack(fill="both", expand=True)
+
+        # Horizontal scrollbar that only appears when tabs overflow
+        tab_scroll = ttk.Scrollbar(nb_outer, orient="horizontal",
+                                   command=lambda *a: None)  # placeholder; wired below
+        tab_scroll.pack(fill="x", side="bottom")
+
+        # Wire scrollbar to notebook tab strip position
+        # Tkinter doesn't expose the internal tab canvas, so we approximate:
+        # the scrollbar moves the notebook's internal tab area via tk.call.
+        def _nb_xscroll(*args):
+            try:
+                nb.tk.call(nb._w, "xview", *args)
+            except Exception:
+                pass
+
+        def _update_scrollbar(event=None):
+            try:
+                # get total tab width vs visible width
+                total = sum(nb.tk.call(nb._w, "identify", "tab", nb.index(t))
+                            for t in range(nb.index("end"))) if False else 0
+                nb_w  = nb.winfo_width()
+                # simpler: show scrollbar only when tabs overflow
+                tab_count  = nb.index("end")
+                # approximate: each tab ~110px
+                est_total  = tab_count * 118
+                if est_total > nb_w and nb_w > 10:
+                    tab_scroll.pack(fill="x", side="bottom")
+                else:
+                    tab_scroll.pack_forget()
+            except Exception:
+                pass
+
+        nb.bind("<Configure>", _update_scrollbar)
+
+        # MouseWheel → cycle tabs
+        def _nb_scroll(event):
+            try:
+                cur   = nb.index("current")
+                total = nb.index("end")
+                if event.delta > 0:
+                    nb.select((cur - 1) % total)
+                else:
+                    nb.select((cur + 1) % total)
+            except Exception:
+                pass
+
+        nb.bind("<MouseWheel>", _nb_scroll)
+        # Also bind on the title bar area so wheel anywhere on top works
+        title_bar.bind("<MouseWheel>", _nb_scroll)
+        self.root.bind("<Control-Tab>",       lambda e: nb.select((nb.index("current") + 1) % nb.index("end")))
+        self.root.bind("<Control-Shift-Tab>", lambda e: nb.select((nb.index("current") - 1) % nb.index("end")))
 
         tab1 = ttk.Frame(nb)
         tab2 = ttk.Frame(nb)
         tab3 = ttk.Frame(nb)
         tab4 = ttk.Frame(nb)
         tab5 = ttk.Frame(nb)
+        tab6 = ttk.Frame(nb)
+        tab7 = ttk.Frame(nb)
+        tab8 = ttk.Frame(nb)
         nb.add(tab1, text="  ▶  Main  ")
         nb.add(tab2, text="  ⚙  Command Builder  ")
         nb.add(tab3, text="  🖥  VM Controls  ")
         nb.add(tab4, text="  🗳  OS Voting  ")
         nb.add(tab5, text="  🎨  Appearance  ")
+        nb.add(tab6, text="  📡  OBS  ")
+        nb.add(tab7, text="  📊  Statistics  ")
+        nb.add(tab8, text="  🚫  User Management  ")
 
         self._build_main_tab(tab1)
         self._build_cmd_builder_tab(tab2)
         self._build_vm_controls_tab(tab3)
         self._build_os_voting_tab(tab4)
         self._build_appearance_tab(tab5)
+        self._build_obs_tab(tab6)
+        self._build_statistics_tab(tab7)
+        self._build_user_mgmt_tab(tab8)
         self._sync_main_vm_lock()
+        self._bind_context_menus()   # attach right-click menus to all Entry/Text widgets
+        self._stats_update_job = None
+        self.root.after(1000, self._refresh_stats_display)
 
     # ──────────────── TAB 1 : MAIN ────────────────
     def _build_main_tab(self, parent):
@@ -2619,6 +2949,246 @@ class UltraBotGUI:
         self._full_ui_rebuild()
         self._log("[Appearance] Reset to default theme.")
 
+    # ──────────────── TAB 6 : OBS ────────────────
+    def _build_obs_tab(self, parent):
+        parent.configure(style="TFrame")
+
+        TRIGGER_LABELS = {
+            "bot_start":    "Bot started",
+            "bot_stop":     "Bot stopped",
+            "os_switch":    "OS switched (voting)",
+            "revert_start": "Revert started",
+            "revert_done":  "Revert completed",
+            "restart":      "VM restarted",
+        }
+
+        # ── Scrollable canvas wrapper ──
+        canvas    = tk.Canvas(parent, bg=self.BG, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        inner = tk.Frame(canvas, bg=self.BG)
+        inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_cfg(e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        def _on_canvas_cfg(e):
+            canvas.itemconfig(inner_id, width=e.width)
+        def _on_wheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+
+        inner.bind("<Configure>",   _on_inner_cfg)
+        canvas.bind("<Configure>",  _on_canvas_cfg)
+        canvas.bind("<MouseWheel>", _on_wheel)
+        inner.bind("<MouseWheel>",  _on_wheel)
+
+        # ── Header ──
+        header = tk.Frame(inner, bg=self.BG)
+        header.pack(fill="x", padx=16, pady=(14, 4))
+        tk.Label(header, text="OBS WebSocket Integration",
+                 bg=self.BG, fg=self.ACCENT,
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        tk.Label(header,
+                 text="Requires OBS 28+ with WebSocket server enabled (Tools → WebSocket Server Settings).\n"
+                      "Install the Python library:  pip install obsws-python",
+                 bg=self.BG, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9), justify="left").pack(anchor="w", pady=(2, 0))
+
+        if not _OBS_LIB_OK:
+            tk.Label(inner,
+                     text="⚠  obsws-python is not installed.\nRun:  pip install obsws-python",
+                     bg=self.BG, fg=self.RED,
+                     font=("Segoe UI", 10, "bold")).pack(pady=(8, 0))
+
+        # ── Enable toggle ──
+        toggle_card = ttk.Frame(inner, style="Card.TFrame", padding=14)
+        toggle_card.pack(fill="x", padx=16, pady=(10, 6))
+        toggle_card.bind("<MouseWheel>", _on_wheel)
+        self._obs_enabled_var = tk.BooleanVar(value=OBS_CONFIG.get("enabled", False))
+        tk.Checkbutton(toggle_card,
+            text="Enable OBS WebSocket Integration",
+            variable=self._obs_enabled_var,
+            bg=self.BG2, fg=self.TEXT,
+            selectcolor=self.BG3,
+            activebackground=self.BG2, activeforeground=self.TEXT,
+            font=("Segoe UI", 10, "bold")).pack(anchor="w")
+
+        # ── Connection settings ──
+        conn_card = ttk.Frame(inner, style="Card.TFrame", padding=14)
+        conn_card.pack(fill="x", padx=16, pady=(0, 6))
+        conn_card.bind("<MouseWheel>", _on_wheel)
+        tk.Label(conn_card, text="Connection",
+                 bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=4,
+                                                      sticky="w", pady=(0, 8))
+        tk.Label(conn_card, text="Host", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9)).grid(row=1, column=0, sticky="w", padx=(0, 6))
+        self._obs_host_var = tk.StringVar(value=OBS_CONFIG.get("host", "localhost"))
+        ttk.Entry(conn_card, textvariable=self._obs_host_var,
+                  width=18, font=("Segoe UI", 10)).grid(row=1, column=1, padx=(0, 16), ipady=3)
+        tk.Label(conn_card, text="Port", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9)).grid(row=1, column=2, sticky="w", padx=(0, 6))
+        self._obs_port_var = tk.StringVar(value=str(OBS_CONFIG.get("port", 4455)))
+        ttk.Entry(conn_card, textvariable=self._obs_port_var,
+                  width=7, font=("Segoe UI", 10)).grid(row=1, column=3, padx=(0, 16), ipady=3)
+        tk.Label(conn_card, text="Password", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9)).grid(row=2, column=0, sticky="w", padx=(0, 6), pady=(8, 0))
+        self._obs_pass_var = tk.StringVar(value=OBS_CONFIG.get("password", ""))
+        ttk.Entry(conn_card, textvariable=self._obs_pass_var, show="●",
+                  width=28, font=("Segoe UI", 10)).grid(row=2, column=1, columnspan=3,
+                                                         pady=(8, 0), ipady=3)
+        conn_btn_row = tk.Frame(conn_card, bg=self.BG2)
+        conn_btn_row.grid(row=3, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        conn_btn_row.bind("<MouseWheel>", _on_wheel)
+        ttk.Button(conn_btn_row, text="🔗 Connect", style="Green.TButton",
+                   command=self._obs_connect).pack(side="left", padx=(0, 8))
+        ttk.Button(conn_btn_row, text="✖ Disconnect", style="Red.TButton",
+                   command=self._obs_disconnect).pack(side="left", padx=(0, 16))
+        self._obs_status_label = tk.Label(conn_btn_row,
+                 text="● Disconnected", bg=self.BG2, fg=self.RED,
+                 font=("Segoe UI", 9, "bold"))
+        self._obs_status_label.pack(side="left", padx=(4, 0))
+
+        # ── Scene triggers ──
+        trigger_card = ttk.Frame(inner, style="Card.TFrame", padding=14)
+        trigger_card.pack(fill="x", padx=16, pady=(0, 6))
+        trigger_card.bind("<MouseWheel>", _on_wheel)
+        tk.Label(trigger_card, text="Scene Triggers",
+                 bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 4))
+        tk.Label(trigger_card,
+                 text="Enter the exact OBS scene name to switch to when each event fires. Leave blank to skip.",
+                 bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8)).pack(anchor="w", pady=(0, 10))
+        self._obs_trigger_vars = {}
+        for key, label in TRIGGER_LABELS.items():
+            row = tk.Frame(trigger_card, bg=self.BG2)
+            row.pack(fill="x", pady=3)
+            row.bind("<MouseWheel>", _on_wheel)
+            tk.Label(row, text=label, bg=self.BG2, fg=self.TEXT,
+                     font=("Segoe UI", 9), width=28, anchor="w").pack(side="left")
+            var = tk.StringVar(value=OBS_CONFIG["triggers"].get(key, ""))
+            self._obs_trigger_vars[key] = var
+            ttk.Entry(row, textvariable=var, width=30,
+                      font=("Segoe UI", 9)).pack(side="left", padx=(8, 0), ipady=2)
+
+        # ── Per-OS scenes ──
+        os_scene_card = ttk.Frame(inner, style="Card.TFrame", padding=14)
+        os_scene_card.pack(fill="x", padx=16, pady=(0, 6))
+        os_scene_card.bind("<MouseWheel>", _on_wheel)
+        tk.Label(os_scene_card, text="Per-OS Scene Switching",
+                 bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 4))
+        tk.Label(os_scene_card,
+                 text="When OS voting switches to a specific OS, OBS switches to that OS's scene.\n"
+                      "Chat Trigger must match the trigger set in the OS Voting tab (e.g. win7, win10).",
+                 bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8), justify="left").pack(anchor="w", pady=(0, 8))
+
+        hdr = tk.Frame(os_scene_card, bg=self.BG2)
+        hdr.pack(fill="x", pady=(0, 4))
+        hdr.bind("<MouseWheel>", _on_wheel)
+        tk.Label(hdr, text="OS Name",      bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8, "bold"), width=18, anchor="w").pack(side="left", padx=(0, 8))
+        tk.Label(hdr, text="Chat Trigger", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8, "bold"), width=14, anchor="w").pack(side="left", padx=(0, 8))
+        tk.Label(hdr, text="OBS Scene Name", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8, "bold"), width=24, anchor="w").pack(side="left")
+
+        self._obs_os_rows = []
+        self._obs_os_rows_frame = tk.Frame(os_scene_card, bg=self.BG2)
+        self._obs_os_rows_frame.pack(fill="x")
+        self._obs_os_rows_frame.bind("<MouseWheel>", _on_wheel)
+        self._obs_wheel_fn = _on_wheel   # store for _add_obs_os_row
+
+        saved_os_scenes = OBS_CONFIG.get("os_scenes", {})
+        prefill = []
+        for entry in OS_LIST:
+            t = (entry.get("trigger") or "").strip().lower().lstrip("!")
+            n = entry.get("name", "")
+            if t:
+                prefill.append((n, t, saved_os_scenes.get(t, "")))
+        for trig, scene in saved_os_scenes.items():
+            if not any(p[1] == trig for p in prefill):
+                prefill.append(("", trig, scene))
+        while len(prefill) < 5:
+            prefill.append(("", "", ""))
+        for name, trig, scene in prefill:
+            self._add_obs_os_row(name, trig, scene)
+
+        ttk.Button(os_scene_card, text="+ Add Row", style="Dim.TButton",
+                   command=lambda: self._add_obs_os_row()).pack(anchor="w", pady=(8, 0))
+
+        # ── Save ──
+        btn_row = tk.Frame(inner, bg=self.BG)
+        btn_row.pack(fill="x", padx=16, pady=(0, 20))
+        btn_row.bind("<MouseWheel>", _on_wheel)
+        ttk.Button(btn_row, text="💾 Save OBS Settings", style="Green.TButton",
+                   command=self._obs_save).pack(side="left")
+
+    def _add_obs_os_row(self, name="", trigger="", scene=""):
+        row = tk.Frame(self._obs_os_rows_frame, bg=self.BG2)
+        row.pack(fill="x", pady=2)
+        if hasattr(self, '_obs_wheel_fn'):
+            row.bind("<MouseWheel>", self._obs_wheel_fn)
+        name_var  = tk.StringVar(value=name)
+        trig_var  = tk.StringVar(value=trigger)
+        scene_var = tk.StringVar(value=scene)
+        ttk.Entry(row, textvariable=name_var,  width=18,
+                  font=("Segoe UI", 9)).pack(side="left", padx=(0, 8), ipady=2)
+        ttk.Entry(row, textvariable=trig_var,  width=14,
+                  font=("Segoe UI Mono", 9)).pack(side="left", padx=(0, 8), ipady=2)
+        ttk.Entry(row, textvariable=scene_var, width=24,
+                  font=("Segoe UI", 9)).pack(side="left", ipady=2)
+        ttk.Button(row, text="✕", style="Dim.TButton", width=2,
+                   command=lambda r=row, t=(name_var, trig_var, scene_var): (
+                       r.destroy(),
+                       self._obs_os_rows.remove(t) if t in self._obs_os_rows else None
+                   )).pack(side="left", padx=(6, 0))
+        self._obs_os_rows.append((name_var, trig_var, scene_var))
+
+    def _obs_connect(self):
+        OBS_CONFIG["host"]     = self._obs_host_var.get().strip()
+        OBS_CONFIG["port"]     = int(self._obs_port_var.get().strip() or 4455)
+        OBS_CONFIG["password"] = self._obs_pass_var.get()
+        ok = obs_connect()
+        if ok:
+            self._obs_status_label.configure(text="● Connected", fg=self.GREEN)
+            notify("OBS Connected", f"Connected to OBS at {OBS_CONFIG['host']}:{OBS_CONFIG['port']}")
+        else:
+            self._obs_status_label.configure(text="● Connection Failed", fg=self.RED)
+            messagebox.showerror("OBS Connection Failed",
+                "Could not connect to OBS.\n\n"
+                "Make sure:\n"
+                "• OBS is running\n"
+                "• WebSocket server is enabled (Tools → WebSocket Server Settings)\n"
+                "• Host, port and password are correct")
+
+    def _obs_disconnect(self):
+        obs_disconnect()
+        if hasattr(self, '_obs_status_label'):
+            self._obs_status_label.configure(text="● Disconnected", fg=self.RED)
+
+    def _obs_save(self):
+        OBS_CONFIG["enabled"]  = self._obs_enabled_var.get()
+        OBS_CONFIG["host"]     = self._obs_host_var.get().strip()
+        OBS_CONFIG["port"]     = int(self._obs_port_var.get().strip() or 4455)
+        OBS_CONFIG["password"] = self._obs_pass_var.get()
+        for key, var in self._obs_trigger_vars.items():
+            OBS_CONFIG["triggers"][key] = var.get().strip()
+        # Save per-OS scenes
+        os_scenes = {}
+        for name_var, trig_var, scene_var in self._obs_os_rows:
+            trig  = trig_var.get().strip().lower().lstrip("!")
+            scene = scene_var.get().strip()
+            if trig and scene:
+                os_scenes[trig] = scene
+        OBS_CONFIG["os_scenes"] = os_scenes
+        save_obs_config()
+        messagebox.showinfo("Saved", "OBS settings saved.")
+
     def _on_auto_start_toggle(self):
         global AUTO_START_ENABLED
         AUTO_START_ENABLED = self._auto_start_var.get()
@@ -2890,6 +3460,8 @@ class UltraBotGUI:
 
         self._log(f"Starting bot → YT: {VIDEO_ID}  |  VM: {VM_NAME}")
         notify("Bot Started", f"Listening on: {VIDEO_ID}\nVM: {VM_NAME}")
+        obs_trigger("bot_start")
+        _reset_session_stats()
 
         self._bot_instance = None
         self._bot_thread = threading.Thread(target=self._run_bot, daemon=True)
@@ -2947,6 +3519,7 @@ class UltraBotGUI:
         self._set_status("Stopped", self.RED)
         self._log("Bot stopped by user.")
         notify("Bot Stopped", "The bot has been stopped.")
+        obs_trigger("bot_stop")
 
     # ──────────────── Admin CMD ────────────────
     def _send_admin_cmd(self):
@@ -3010,6 +3583,429 @@ class UltraBotGUI:
         threading.Thread(target=run, daemon=True).start()
 
     # ──────────────── Command Builder ────────────────
+    # ──────────────── TAB 7 : STATISTICS ────────────────
+    def _build_statistics_tab(self, parent):
+        parent.configure(style="TFrame")
+
+        hdr = tk.Frame(parent, bg=self.BG)
+        hdr.pack(fill="x", padx=16, pady=(14, 6))
+        tk.Label(hdr, text="📊  Session Statistics",
+                 bg=self.BG, fg=self.ACCENT,
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        tk.Label(hdr, text="Live counters — updated every second while the bot is running.",
+                 bg=self.BG, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
+
+        # ── Top counter cards ──
+        cards_frame = tk.Frame(parent, bg=self.BG)
+        cards_frame.pack(fill="x", padx=16, pady=(4, 8))
+
+        self._stat_labels = {}
+
+        def _counter_card(parent_frame, key, title, color):
+            card = tk.Frame(parent_frame, bg=self.BG2, padx=14, pady=10,
+                            relief="flat", bd=0)
+            card.pack(side="left", expand=True, fill="both", padx=(0, 8))
+            tk.Label(card, text=title, bg=self.BG2, fg=self.TEXTDIM,
+                     font=("Segoe UI", 8, "bold")).pack(anchor="w")
+            lbl = tk.Label(card, text="0", bg=self.BG2, fg=color,
+                           font=("Segoe UI", 22, "bold"))
+            lbl.pack(anchor="w")
+            self._stat_labels[key] = lbl
+
+        _counter_card(cards_frame, "session_commands", "Commands (session)", self.GREEN)
+        _counter_card(cards_frame, "total_commands",   "Commands (total)",   self.ACCENT2)
+        _counter_card(cards_frame, "os_switches",      "OS Switches",        self.YELLOW)
+        _counter_card(cards_frame, "restarts",         "Restarts",           self.RED)
+        _counter_card(cards_frame, "reverts",          "Reverts",            "#f08060")
+
+        # uptime card on its own row
+        uptime_card = tk.Frame(parent, bg=self.BG2, padx=14, pady=8)
+        uptime_card.pack(fill="x", padx=16, pady=(0, 10))
+        tk.Label(uptime_card, text="Bot Uptime", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8, "bold")).pack(side="left", padx=(0, 12))
+        self._stat_labels["uptime"] = tk.Label(uptime_card, text="—",
+                 bg=self.BG2, fg=self.TEXT, font=("Segoe UI", 11, "bold"))
+        self._stat_labels["uptime"].pack(side="left")
+
+        # ── Bottom half: two list frames side by side ──
+        lists_frame = tk.Frame(parent, bg=self.BG)
+        lists_frame.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+
+        # Top commands
+        cmd_card = ttk.Frame(lists_frame, style="Card.TFrame", padding=10)
+        cmd_card.pack(side="left", fill="both", expand=True, padx=(0, 8))
+        tk.Label(cmd_card, text="Most Used Commands",
+                 bg=self.BG2, fg=self.ACCENT,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 6))
+
+        cmd_tree_frame = tk.Frame(cmd_card, bg=self.BORDER, bd=1)
+        cmd_tree_frame.pack(fill="both", expand=True)
+        self._stat_cmd_tree = ttk.Treeview(cmd_tree_frame,
+            columns=("cmd", "count"), show="headings", height=10)
+        self._stat_cmd_tree.heading("cmd",   text="Command")
+        self._stat_cmd_tree.heading("count", text="Uses")
+        self._stat_cmd_tree.column("cmd",   width=140, minwidth=80)
+        self._stat_cmd_tree.column("count", width=60,  minwidth=40, anchor="center")
+        self._stat_cmd_tree.pack(fill="both", expand=True, side="left")
+        ttk.Scrollbar(cmd_tree_frame, orient="vertical",
+                      command=self._stat_cmd_tree.yview).pack(side="right", fill="y")
+        self._stat_cmd_tree.configure(yscrollcommand=lambda *a: None)
+
+        # Top users
+        usr_card = ttk.Frame(lists_frame, style="Card.TFrame", padding=10)
+        usr_card.pack(side="left", fill="both", expand=True)
+        tk.Label(usr_card, text="Most Active Users",
+                 bg=self.BG2, fg=self.ACCENT,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 6))
+
+        usr_tree_frame = tk.Frame(usr_card, bg=self.BORDER, bd=1)
+        usr_tree_frame.pack(fill="both", expand=True)
+        self._stat_usr_tree = ttk.Treeview(usr_tree_frame,
+            columns=("user", "count"), show="headings", height=10)
+        self._stat_usr_tree.heading("user",  text="User")
+        self._stat_usr_tree.heading("count", text="Commands")
+        self._stat_usr_tree.column("user",  width=160, minwidth=80)
+        self._stat_usr_tree.column("count", width=60,  minwidth=40, anchor="center")
+        self._stat_usr_tree.pack(fill="both", expand=True, side="left")
+        ttk.Scrollbar(usr_tree_frame, orient="vertical",
+                      command=self._stat_usr_tree.yview).pack(side="right", fill="y")
+
+        btn_row = tk.Frame(parent, bg=self.BG)
+        btn_row.pack(fill="x", padx=16, pady=(0, 8))
+        ttk.Button(btn_row, text="🔄 Refresh Now", style="Dim.TButton",
+                   command=self._refresh_stats_display).pack(side="left", padx=(0, 8))
+        ttk.Button(btn_row, text="🗑 Reset Session Stats", style="Red.TButton",
+                   command=self._reset_stats).pack(side="left")
+
+    def _refresh_stats_display(self):
+        try:
+            # Counter cards
+            for key in ("session_commands", "total_commands", "os_switches", "restarts", "reverts"):
+                lbl = self._stat_labels.get(key)
+                if lbl:
+                    try:
+                        lbl.configure(text=str(_stats.get(key, 0)))
+                    except Exception:
+                        pass
+
+            # Uptime
+            uptime_lbl = self._stat_labels.get("uptime")
+            if uptime_lbl:
+                t0 = _stats.get("bot_start_time")
+                if t0 and self._bot_running:
+                    elapsed = int(time.time() - t0)
+                    h, rem  = divmod(elapsed, 3600)
+                    m, s    = divmod(rem, 60)
+                    uptime_lbl.configure(text=f"{h:02d}h {m:02d}m {s:02d}s")
+                else:
+                    uptime_lbl.configure(text="—  (bot not running)")
+
+            # Top 15 commands
+            top_cmds = sorted(_stats["command_counts"].items(),
+                              key=lambda x: x[1], reverse=True)[:15]
+            self._stat_cmd_tree.delete(*self._stat_cmd_tree.get_children())
+            for i, (cmd, cnt) in enumerate(top_cmds):
+                tag = "even" if i % 2 == 0 else "odd"
+                self._stat_cmd_tree.insert("", "end", values=(cmd, cnt), tags=(tag,))
+            self._stat_cmd_tree.tag_configure("even", background=self.BG3)
+            self._stat_cmd_tree.tag_configure("odd",  background=self.BG2)
+
+            # Top 15 users
+            top_users = sorted(_stats["user_counts"].items(),
+                               key=lambda x: x[1], reverse=True)[:15]
+            self._stat_usr_tree.delete(*self._stat_usr_tree.get_children())
+            for i, (usr, cnt) in enumerate(top_users):
+                tag = "even" if i % 2 == 0 else "odd"
+                self._stat_usr_tree.insert("", "end", values=(usr, cnt), tags=(tag,))
+            self._stat_usr_tree.tag_configure("even", background=self.BG3)
+            self._stat_usr_tree.tag_configure("odd",  background=self.BG2)
+        except Exception:
+            pass
+        # Schedule next refresh
+        try:
+            self._stats_update_job = self.root.after(2000, self._refresh_stats_display)
+        except Exception:
+            pass
+
+    def _reset_stats(self):
+        if not messagebox.askyesno("Reset Stats", "Reset session statistics?"):
+            return
+        _stats["session_commands"] = 0
+        _stats["os_switches"]      = 0
+        _stats["reverts"]          = 0
+        _stats["restarts"]         = 0
+        _stats["command_counts"].clear()
+        _stats["user_counts"].clear()
+        _stats["bot_start_time"]   = time.time() if self._bot_running else None
+        self._refresh_stats_display()
+        self._log("[Stats] Session statistics reset.")
+
+    # ──────────────── TAB 8 : USER MANAGEMENT ────────────────
+    def _build_user_mgmt_tab(self, parent):
+        parent.configure(style="TFrame")
+
+        hdr = tk.Frame(parent, bg=self.BG)
+        hdr.pack(fill="x", padx=16, pady=(14, 6))
+        tk.Label(hdr, text="🚫  User Management",
+                 bg=self.BG, fg=self.ACCENT,
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        tk.Label(hdr, text="Ban / Unban, Whitelist, and VIP lists — all without typing in chat.",
+                 bg=self.BG, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
+
+        pane = tk.PanedWindow(parent, orient="horizontal",
+                              bg=self.BORDER, sashwidth=4, sashrelief="flat")
+        pane.pack(fill="both", expand=True, padx=12, pady=(4, 12))
+
+        # ───── LEFT: Banned users ─────
+        left = ttk.Frame(pane, style="Card.TFrame", padding=10)
+        pane.add(left, minsize=280)
+
+        tk.Label(left, text="🚫  Banned Users",
+                 bg=self.BG2, fg=self.RED,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 6))
+
+        ban_tree_frame = tk.Frame(left, bg=self.BORDER, bd=1)
+        ban_tree_frame.pack(fill="both", expand=True)
+
+        self._ban_tree = ttk.Treeview(ban_tree_frame,
+            columns=("user", "expires"), show="headings", height=10)
+        self._ban_tree.heading("user",    text="Username")
+        self._ban_tree.heading("expires", text="Expires")
+        self._ban_tree.column("user",    width=130, minwidth=80)
+        self._ban_tree.column("expires", width=110, minwidth=80)
+        self._ban_tree.pack(fill="both", expand=True, side="left")
+        ttk.Scrollbar(ban_tree_frame, orient="vertical",
+                      command=self._ban_tree.yview).pack(side="right", fill="y")
+
+        # Manual ban row
+        ban_input = tk.Frame(left, bg=self.BG2)
+        ban_input.pack(fill="x", pady=(8, 4))
+        tk.Label(ban_input, text="Username:", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 6))
+        self._ban_user_var = tk.StringVar()
+        ttk.Entry(ban_input, textvariable=self._ban_user_var,
+                  width=16, font=("Segoe UI", 10)).pack(side="left", ipady=3, padx=(0, 6))
+        tk.Label(ban_input, text="Min:", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 4))
+        self._ban_dur_var = tk.StringVar(value="30")
+        ttk.Entry(ban_input, textvariable=self._ban_dur_var,
+                  width=5, font=("Segoe UI", 10)).pack(side="left", ipady=3, padx=(0, 6))
+
+        ban_btn_row = tk.Frame(left, bg=self.BG2)
+        ban_btn_row.pack(fill="x", pady=(0, 4))
+        ttk.Button(ban_btn_row, text="🚫 Ban", style="Red.TButton",
+                   command=self._gui_ban_user).pack(side="left", expand=True, fill="x", padx=(0, 4))
+        ttk.Button(ban_btn_row, text="✅ Unban", style="Green.TButton",
+                   command=self._gui_unban_user).pack(side="left", expand=True, fill="x")
+
+        ttk.Button(left, text="🔄 Refresh Ban List", style="Dim.TButton",
+                   command=self._refresh_ban_list).pack(fill="x", pady=(4, 0))
+
+        # ───── RIGHT: Whitelist + VIP ─────
+        right = tk.Frame(pane, bg=self.BG)
+        pane.add(right, minsize=320)
+
+        # Whitelist card
+        wl_card = ttk.Frame(right, style="Card.TFrame", padding=10)
+        wl_card.pack(fill="both", expand=True, pady=(0, 6))
+
+        wl_hdr = tk.Frame(wl_card, bg=self.BG2)
+        wl_hdr.pack(fill="x", pady=(0, 6))
+        tk.Label(wl_hdr, text="✅  Whitelist",
+                 bg=self.BG2, fg=self.GREEN,
+                 font=("Segoe UI", 10, "bold")).pack(side="left")
+        self._wl_enabled_var = tk.BooleanVar(value=bool(whitelist_users))
+        tk.Checkbutton(wl_hdr, text="Enabled (only listed users can use commands)",
+                       variable=self._wl_enabled_var, bg=self.BG2, fg=self.TEXTDIM,
+                       selectcolor=self.BG3, activebackground=self.BG2,
+                       activeforeground=self.TEXT, font=("Segoe UI", 8),
+                       command=self._on_whitelist_toggle).pack(side="left", padx=(10, 0))
+
+        wl_list_frame = tk.Frame(wl_card, bg=self.BORDER, bd=1)
+        wl_list_frame.pack(fill="both", expand=True)
+        self._wl_listbox = tk.Listbox(wl_list_frame,
+            bg=self.BG3, fg=self.TEXT,
+            selectbackground=self.ACCENT, selectforeground="#fff",
+            activestyle="none", font=("Segoe UI Mono", 10),
+            relief="flat", bd=0, height=7)
+        self._wl_listbox.pack(fill="both", expand=True, side="left")
+        ttk.Scrollbar(wl_list_frame, orient="vertical",
+                      command=self._wl_listbox.yview).pack(side="right", fill="y")
+
+        wl_input = tk.Frame(wl_card, bg=self.BG2)
+        wl_input.pack(fill="x", pady=(6, 0))
+        self._wl_user_var = tk.StringVar()
+        ttk.Entry(wl_input, textvariable=self._wl_user_var,
+                  width=20, font=("Segoe UI", 10)).pack(side="left", ipady=3, padx=(0, 6))
+        ttk.Button(wl_input, text="＋ Add", style="Green.TButton",
+                   command=self._wl_add).pack(side="left", padx=(0, 4))
+        ttk.Button(wl_input, text="✕ Remove", style="Red.TButton",
+                   command=self._wl_remove).pack(side="left")
+
+        # VIP card
+        vip_card = ttk.Frame(right, style="Card.TFrame", padding=10)
+        vip_card.pack(fill="both", expand=True)
+
+        tk.Label(vip_card, text="⭐  VIP Users",
+                 bg=self.BG2, fg=self.YELLOW,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 6))
+        tk.Label(vip_card,
+                 text="VIPs need fewer votes for restart/revert (1 = solo bypass).",
+                 bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8)).pack(anchor="w", pady=(0, 6))
+
+        vip_list_frame = tk.Frame(vip_card, bg=self.BORDER, bd=1)
+        vip_list_frame.pack(fill="both", expand=True)
+        self._vip_tree = ttk.Treeview(vip_list_frame,
+            columns=("user", "votes"), show="headings", height=6)
+        self._vip_tree.heading("user",  text="Username")
+        self._vip_tree.heading("votes", text="Votes needed")
+        self._vip_tree.column("user",  width=160, minwidth=80)
+        self._vip_tree.column("votes", width=90,  minwidth=60, anchor="center")
+        self._vip_tree.pack(fill="both", expand=True, side="left")
+        ttk.Scrollbar(vip_list_frame, orient="vertical",
+                      command=self._vip_tree.yview).pack(side="right", fill="y")
+
+        vip_input = tk.Frame(vip_card, bg=self.BG2)
+        vip_input.pack(fill="x", pady=(6, 0))
+        self._vip_user_var  = tk.StringVar()
+        self._vip_votes_var = tk.StringVar(value="1")
+        ttk.Entry(vip_input, textvariable=self._vip_user_var,
+                  width=16, font=("Segoe UI", 10)).pack(side="left", ipady=3, padx=(0, 4))
+        tk.Label(vip_input, text="Votes:", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 4))
+        ttk.Entry(vip_input, textvariable=self._vip_votes_var,
+                  width=4, font=("Segoe UI", 10)).pack(side="left", ipady=3, padx=(0, 6))
+        ttk.Button(vip_input, text="＋ Add VIP", style="Accent.TButton",
+                   command=self._vip_add).pack(side="left", padx=(0, 4))
+        ttk.Button(vip_input, text="✕ Remove", style="Red.TButton",
+                   command=self._vip_remove).pack(side="left")
+
+        self._refresh_ban_list()
+        self._refresh_wl_list()
+        self._refresh_vip_list()
+
+    # ── Ban/Unban helpers ──
+    def _refresh_ban_list(self):
+        self._ban_tree.delete(*self._ban_tree.get_children())
+        now = time.time()
+        expired = [u for u, exp in list(banned_users.items()) if now >= exp]
+        for u in expired:
+            del banned_users[u]
+        for i, (user, exp) in enumerate(sorted(banned_users.items(), key=lambda x: x[1])):
+            remaining = max(0, int(exp - now))
+            m, s = divmod(remaining, 60)
+            tag = "even" if i % 2 == 0 else "odd"
+            self._ban_tree.insert("", "end", values=(user, f"{m}m {s}s"), tags=(tag,))
+        self._ban_tree.tag_configure("even", background=self.BG3)
+        self._ban_tree.tag_configure("odd",  background=self.BG2)
+        self.root.after(5000, self._refresh_ban_list)
+
+    def _gui_ban_user(self):
+        username = self._ban_user_var.get().strip().lower()
+        if not username:
+            messagebox.showwarning("Missing", "Enter a username to ban.")
+            return
+        try:
+            minutes = max(1, int(self._ban_dur_var.get().strip()))
+        except ValueError:
+            minutes = 30
+        banned_users[username] = time.time() + minutes * 60
+        self._ban_user_var.set("")
+        self._log(f"[UserMgmt] Banned '{username}' for {minutes} min.")
+        notify("User Banned", f"@{username} banned for {minutes} minutes.")
+        self._refresh_ban_list()
+
+    def _gui_unban_user(self):
+        sel = self._ban_tree.selection()
+        if not sel:
+            # also try the typed field
+            username = self._ban_user_var.get().strip().lower()
+            if username and username in banned_users:
+                del banned_users[username]
+                self._log(f"[UserMgmt] Unbanned '{username}'.")
+                self._ban_user_var.set("")
+                self._refresh_ban_list()
+            else:
+                messagebox.showinfo("Select", "Select a user in the list or type a username.")
+            return
+        username = self._ban_tree.item(sel[0], "values")[0]
+        if username in banned_users:
+            del banned_users[username]
+            self._log(f"[UserMgmt] Unbanned '{username}'.")
+            self._refresh_ban_list()
+
+    # ── Whitelist helpers ──
+    def _on_whitelist_toggle(self):
+        if not self._wl_enabled_var.get():
+            whitelist_users.clear()
+            save_user_mgmt()
+            self._log("[UserMgmt] Whitelist disabled — all users can use commands.")
+
+    def _refresh_wl_list(self):
+        self._wl_listbox.delete(0, "end")
+        for u in sorted(whitelist_users):
+            self._wl_listbox.insert("end", u)
+
+    def _wl_add(self):
+        username = self._wl_user_var.get().strip().lower()
+        if not username:
+            return
+        whitelist_users.add(username)
+        self._wl_user_var.set("")
+        self._wl_enabled_var.set(True)
+        save_user_mgmt()
+        self._refresh_wl_list()
+        self._log(f"[UserMgmt] Added '{username}' to whitelist.")
+
+    def _wl_remove(self):
+        sel = self._wl_listbox.curselection()
+        if not sel:
+            return
+        username = self._wl_listbox.get(sel[0])
+        whitelist_users.discard(username)
+        save_user_mgmt()
+        self._refresh_wl_list()
+        self._log(f"[UserMgmt] Removed '{username}' from whitelist.")
+        if not whitelist_users:
+            self._wl_enabled_var.set(False)
+
+    # ── VIP helpers ──
+    def _refresh_vip_list(self):
+        self._vip_tree.delete(*self._vip_tree.get_children())
+        for i, (usr, info) in enumerate(sorted(vip_users.items())):
+            tag = "even" if i % 2 == 0 else "odd"
+            self._vip_tree.insert("", "end",
+                values=(usr, info.get("votes_needed", 1)), tags=(tag,))
+        self._vip_tree.tag_configure("even", background=self.BG3)
+        self._vip_tree.tag_configure("odd",  background=self.BG2)
+
+    def _vip_add(self):
+        username = self._vip_user_var.get().strip().lower()
+        if not username:
+            return
+        try:
+            votes = max(1, int(self._vip_votes_var.get().strip()))
+        except ValueError:
+            votes = 1
+        vip_users[username] = {"votes_needed": votes}
+        self._vip_user_var.set("")
+        save_user_mgmt()
+        self._refresh_vip_list()
+        self._log(f"[UserMgmt] Added VIP '{username}' (votes needed: {votes}).")
+
+    def _vip_remove(self):
+        sel = self._vip_tree.selection()
+        if not sel:
+            return
+        username = self._vip_tree.item(sel[0], "values")[0]
+        vip_users.pop(username, None)
+        save_user_mgmt()
+        self._refresh_vip_list()
+        self._log(f"[UserMgmt] Removed VIP '{username}'.")
+
     # ──────────────── Chain Parser ────────────────
     def _parse_chain_input(self):
         """
@@ -3142,10 +4138,295 @@ class UltraBotGUI:
                          args=(trigger,), daemon=True).start()
         self._log(f"[CustomCmd] Testing '{trigger}'...")
 
+    # ──────────────── Welcome / User Guide ────────────────
+    GUIDE_FLAG_FILE = "guide_seen.flag"
+
+    def show_welcome_guide(self, force=False):
+        if not force and os.path.exists(self.GUIDE_FLAG_FILE):
+            return
+
+        W, H = 800, 560
+        dlg = tk.Toplevel(self.root)
+        dlg.title("📖  UltraBot — User Guide")
+        dlg.configure(bg=self.BG)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        self.root.update_idletasks()
+        rx = self.root.winfo_x() + (self.root.winfo_width()  - W) // 2
+        ry = self.root.winfo_y() + (self.root.winfo_height() - H) // 2
+        dlg.geometry(f"{W}x{H}+{rx}+{ry}")
+
+        # Header
+        hdr = tk.Frame(dlg, bg=self.ACCENT, height=54)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        tk.Label(hdr, text="📖  UltraBot Control Panel — User Guide",
+                 bg=self.ACCENT, fg="#ffffff",
+                 font=("Segoe UI", 13, "bold")).pack(side="left", padx=18, pady=10)
+        tk.Label(hdr, text=f"v{VERSION}",
+                 bg=self.ACCENT, fg="#ccbbee",
+                 font=("Segoe UI", 9)).pack(side="right", padx=18)
+
+        # Body
+        body = tk.Frame(dlg, bg=self.BG)
+        body.pack(fill="both", expand=True)
+
+        # Sidebar
+        sidebar = tk.Frame(body, bg=self.BG2, width=200)
+        sidebar.pack(side="left", fill="y")
+        sidebar.pack_propagate(False)
+        tk.Label(sidebar, text="CHAPTERS", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
+
+        # Right text area
+        right_pane = tk.Frame(body, bg=self.BG)
+        right_pane.pack(side="left", fill="both", expand=True)
+        txt_frame = tk.Frame(right_pane, bg=self.BORDER, bd=1)
+        txt_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        txt = tk.Text(txt_frame, bg=self.BG3, fg=self.TEXT,
+                      font=("Segoe UI", 10), wrap="word",
+                      relief="flat", bd=0, padx=16, pady=12,
+                      state="disabled", cursor="arrow",
+                      selectbackground=self.ACCENT)
+        sb = ttk.Scrollbar(txt_frame, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        txt.pack(fill="both", expand=True)
+
+        # Text tags
+        txt.tag_configure("h1",   font=("Segoe UI", 15, "bold"), foreground=self.ACCENT2,  spacing1=4,  spacing3=6)
+        txt.tag_configure("h2",   font=("Segoe UI", 11, "bold"), foreground=self.YELLOW,   spacing1=12, spacing3=3)
+        txt.tag_configure("body", font=("Segoe UI", 10),          foreground=self.TEXT,     spacing1=2,  lmargin1=4, lmargin2=4)
+        txt.tag_configure("code", font=("Consolas", 9),           foreground=self.GREEN,    background=self.BG2, spacing1=1, lmargin1=16, lmargin2=16)
+        txt.tag_configure("tip",  font=("Segoe UI", 9, "italic"), foreground=self.TEXTDIM,  spacing1=3,  lmargin1=4)
+
+        CHAPTERS = [
+            ("🚀  Getting Started", [
+                ("h1",   "🚀  Getting Started"),
+                ("body", "Welcome to UltraBot! This guide explains every feature so you can hit the ground running."),
+                ("h2",   "First-time setup"),
+                ("body", "1.  Paste your YouTube Video ID into the Main tab."),
+                ("body", "    e.g. if your URL is  youtube.com/watch?v=abc123XYZ  →  enter  abc123XYZ"),
+                ("code", "  YouTube Video ID  →  abc123XYZ"),
+                ("body", "2.  Pick your VirtualBox VM from the dropdown (click 🔄 Refresh if it is empty)."),
+                ("body", "3.  Click  ▶ Start Bot  — the bot connects to chat and starts listening."),
+                ("h2",   "Stopping the bot"),
+                ("body", "Press  ⏹ Stop Bot.  The VM keeps running; only the chat listener stops."),
+                ("h2",   "Minimize to tray"),
+                ("body", "Click  📌 Minimize to Tray,  or close the window and choose Yes. The bot keeps running in the background.  Right-click the tray icon to restore or fully exit."),
+                ("h2",   "Auto-Start Watchdog"),
+                ("body", "Check  Auto-Start Watchdog  on the Main tab. If the VM crashes or powers off, the bot restarts it automatically within 10 seconds."),
+            ]),
+            ("⌨️  Chat Commands", [
+                ("h1",   "⌨️  Chat Commands"),
+                ("body", "Viewers type commands in your live chat. Every command starts with  !"),
+                ("h2",   "Keyboard"),
+                ("code", "  !type hello         →  types  hello  into the VM"),
+                ("code", "  !send notepad.exe   →  types text and presses Enter"),
+                ("code", "  !combo win+r        →  presses Win + R together"),
+                ("code", "  !key enter          →  presses a single key"),
+                ("code", "  !keydown shift       →  holds a key down"),
+                ("code", "  !keyup   shift       →  releases a held key"),
+                ("h2",   "Mouse"),
+                ("code", "  !click              →  left-click at current position"),
+                ("code", "  !rclick             →  right-click"),
+                ("code", "  !move 500 300       →  move cursor to x=500 y=300"),
+                ("code", "  !scroll 3           →  scroll up 3 ticks  (negative = down)"),
+                ("code", "  !drag 100 200       →  click-drag by 100x 200y"),
+                ("h2",   "VM actions  (vote required by default)"),
+                ("code", "  !restart            →  reset the VM  (2 votes needed)"),
+                ("code", "  !revert             →  restore snapshot  (2 votes needed)"),
+                ("code", "  !ban @username      →  ban a user  (3 votes needed)"),
+                ("h2",   "Misc"),
+                ("code", "  !votehelp           →  shows  'Commands in description!'  on overlay"),
+                ("code", "  !clearvotes         →  admin only: clear all active votes"),
+                ("tip",  "Tip: votes expire after 120 seconds if the threshold is not reached."),
+                ("tip",  "Tip: the stream owner (isChatOwner) always bypasses vote requirements."),
+            ]),
+            ("⚙️  Command Builder", [
+                ("h1",   "⚙️  Command Builder"),
+                ("body", "Create custom chat commands — no coding required."),
+                ("h2",   "Quick Chain Input  (fastest)"),
+                ("body", "Type a full sequence in chat syntax in the chain field, then press  ⇨ Parse Steps:"),
+                ("code", "  !combo win+r !wait 800 !send notepad.exe !key enter"),
+                ("body", "This generates a 4-step command instantly."),
+                ("h2",   "Step-by-step"),
+                ("body", "1.  Click  ＋ New  to start fresh."),
+                ("body", "2.  Set the trigger name, e.g.  !bubbles"),
+                ("body", "3.  Pick an action (combo / send / wait / click…), fill in args, press  ＋ Add Step."),
+                ("body", "4.  Reorder with  ▲ Up / ▼ Down.  Remove a step with  ✕ Remove."),
+                ("body", "5.  Press  💾 Save Command,  then  ▶ Test Now  to try it live."),
+                ("tip",  "Tip: commands are saved to  custom_commands.json  and survive restarts."),
+                ("tip",  "Tip: available actions —  combo, send, sendenter, key, keydown, keyup, wait, click, rclick, move, abs, scroll"),
+            ]),
+            ("🖥️  VM Controls", [
+                ("h1",   "🖥️  VM Controls"),
+                ("body", "Admin-only actions — no vote needed, only you can trigger these."),
+                ("code", "  ▶  Start VM     →  power on the VM"),
+                ("code", "  🔄 Restart VM   →  send a hardware reset signal"),
+                ("code", "  ⏮  Revert VM   →  power off → restore snapshot → boot"),
+                ("code", "  ⏹  Shutdown VM →  force power off  (ACPI)"),
+                ("h2",   "Admin CMD bar  (Main tab, bottom)"),
+                ("body", "Type a command and press Enter or click Send. Works even when the bot is stopped:"),
+                ("code", "  !startvm          →  start the VM"),
+                ("code", "  !restart          →  reset the VM"),
+                ("code", "  !revert           →  restore snapshot"),
+                ("code", "  !speak Hello!     →  TTS announcement"),
+                ("code", "  !clearvotes       →  wipe all active votes"),
+            ]),
+            ("🗳️  OS Voting", [
+                ("h1",   "🗳️  OS Voting"),
+                ("body", "Let your chat vote to switch between different operating systems live."),
+                ("h2",   "Setup"),
+                ("body", "1.  Go to the  OS Voting  tab and tick  Enable OS Voting."),
+                ("body", "2.  Fill in up to 15 rows: Display Name, Chat Trigger (no ! needed), VirtualBox VM."),
+                ("body", "3.  Click  💾 Save OS Voting Config."),
+                ("h2",   "How it works"),
+                ("body", "Viewers type e.g.  !win7.  When enough votes accumulate (default: 3), the bot powers off the current VM and boots the target one. Progress is shown on the overlay."),
+                ("tip",  "Tip: the stream owner bypasses voting and switches instantly."),
+                ("tip",  "Tip: the last active OS is remembered across bot restarts."),
+            ]),
+            ("📊  Statistics", [
+                ("h1",   "📊  Statistics"),
+                ("body", "Real-time tracking of everything that happens in your stream."),
+                ("h2",   "Counter cards  (refreshed every 2 seconds)"),
+                ("code", "  Commands (session)  →  resets each time the bot starts"),
+                ("code", "  Commands (total)    →  accumulates across all sessions"),
+                ("code", "  OS Switches         →  how many OS changes happened"),
+                ("code", "  Restarts / Reverts  →  VM action counters"),
+                ("code", "  Bot Uptime          →  hh : mm : ss  since last start"),
+                ("h2",   "Leaderboards"),
+                ("body", "Top 15 most used commands and top 15 most active users, sorted by count."),
+                ("h2",   "Reset session"),
+                ("body", "Click  🗑 Reset Session Stats  to wipe session counters and both leaderboards. The all-time total command count is NOT reset."),
+            ]),
+            ("🚫  User Management", [
+                ("h1",   "🚫  User Management"),
+                ("h2",   "Ban / Unban  (without typing in chat)"),
+                ("body", "1.  Type a username + duration in minutes into the fields."),
+                ("body", "2.  Press  🚫 Ban.  The user is blocked for that many minutes immediately."),
+                ("body", "To unban: select from the list and press  ✅ Unban,  or type the name and press Unban."),
+                ("tip",  "Tip: the ban list auto-refreshes every 5 seconds and removes expired bans."),
+                ("h2",   "Whitelist"),
+                ("body", "When enabled, ONLY listed users can use chat commands. The stream owner always bypasses this. Great for private / member-only streams."),
+                ("tip",  "Tip: leave whitelist disabled (default) to allow everyone."),
+                ("h2",   "VIP users"),
+                ("body", "VIPs need fewer votes to trigger restart / revert.  Set  Votes needed = 1  to give a user instant-action power (same as stream owner)."),
+                ("code", "  Example: add  nexoraWN  as VIP with 1 vote"),
+                ("code", "           →  they can solo-restart the VM without other viewers voting"),
+            ]),
+            ("🎨  Appearance", [
+                ("h1",   "🎨  Appearance & Themes"),
+                ("h2",   "Theme presets"),
+                ("body", "Click any preset button to switch theme instantly: Dark Purple, Dark Blue, Dark Green, Dark Red, Dark Orange, Light, Light Blue, OLED Black."),
+                ("h2",   "Custom colors"),
+                ("body", "Click any color swatch to open the color picker and choose an exact hex value. All changes apply live — no restart needed."),
+                ("h2",   "Font size"),
+                ("body", "Drag the font size slider to scale text up or down globally."),
+                ("body", "Press  💾 Save Appearance  to persist settings across restarts."),
+            ]),
+            ("📡  OBS Integration", [
+                ("h1",   "📡  OBS Integration"),
+                ("body", "Automatically switch OBS scenes when bot events happen."),
+                ("h2",   "Setup"),
+                ("body", "1.  In OBS: Tools → WebSocket Server Settings → Enable WebSocket.  Set a port & password."),
+                ("body", "2.  In the OBS tab: enter  host  (usually localhost),  port,  password."),
+                ("body", "3.  Click  Connect — the dot turns green on success."),
+                ("h2",   "Scene triggers"),
+                ("code", "  bot_start     →  scene to switch to when the bot starts"),
+                ("code", "  bot_stop      →  scene when the bot stops"),
+                ("code", "  os_switch     →  scene when OS voting fires"),
+                ("code", "  revert_start  →  scene when a revert begins"),
+                ("code", "  revert_done   →  scene when revert finishes"),
+                ("code", "  restart       →  scene when VM is restarted"),
+                ("h2",   "Per-OS scenes"),
+                ("body", "Each OS entry in the OS Voting tab can have its own OBS scene that activates automatically when that OS is selected."),
+            ]),
+            ("⌨️  Keyboard Shortcuts", [
+                ("h1",   "⌨️  Keyboard Shortcuts"),
+                ("h2",   "Tab navigation"),
+                ("code", "  Ctrl + Tab             →  next tab"),
+                ("code", "  Ctrl + Shift + Tab     →  previous tab"),
+                ("code", "  Mouse wheel on tabs    →  scroll through tabs"),
+                ("h2",   "Text fields  (right-click context menu)"),
+                ("code", "  Right-click  →  Copy / Paste / Cut / Select All"),
+                ("h2",   "Admin CMD bar  (Main tab)"),
+                ("code", "  Enter key  →  send admin command (no button click needed)"),
+                ("h2",   "Command Builder chain field"),
+                ("code", "  Enter key  →  parse chain into steps immediately"),
+                ("h2",   "This guide"),
+                ("code", "  ❓ Help button  (title bar)  →  reopen this guide at any time"),
+                ("tip",  "Tip: tick  'Don't show on startup'  below to skip this guide next time."),
+            ]),
+        ]
+
+        _chapter_btns = []
+
+        def _show_chapter(idx):
+            _, sections = CHAPTERS[idx]
+            txt.configure(state="normal")
+            txt.delete("1.0", "end")
+            for tag, content in sections:
+                txt.insert("end", content + "\n", tag)
+            txt.configure(state="disabled")
+            txt.yview_moveto(0)
+            for i, btn in enumerate(_chapter_btns):
+                btn.configure(
+                    bg=self.ACCENT if i == idx else self.BG2,
+                    fg="#ffffff" if i == idx else self.TEXT,
+                )
+
+        for i, (title, _) in enumerate(CHAPTERS):
+            btn = tk.Button(
+                sidebar, text=title,
+                bg=self.BG2, fg=self.TEXT,
+                activebackground=self.ACCENT, activeforeground="#fff",
+                relief="flat", bd=0, anchor="w",
+                font=("Segoe UI", 9), padx=12, pady=7, cursor="hand2",
+                command=lambda idx=i: _show_chapter(idx),
+            )
+            btn.pack(fill="x", pady=1)
+            _chapter_btns.append(btn)
+
+        _show_chapter(0)
+
+        # Footer
+        footer = tk.Frame(dlg, bg=self.BG2, pady=8)
+        footer.pack(fill="x", side="bottom")
+
+        dont_show_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            footer, text="Don't show this guide on startup",
+            variable=dont_show_var,
+            bg=self.BG2, fg=self.TEXTDIM,
+            selectcolor=self.BG3,
+            activebackground=self.BG2, activeforeground=self.TEXT,
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=16)
+
+        def _close_guide():
+            if dont_show_var.get():
+                try:
+                    with open(self.GUIDE_FLAG_FILE, "w") as f:
+                        f.write("seen")
+                except Exception:
+                    pass
+            dlg.destroy()
+
+        ttk.Button(footer, text="✔  Got it, close guide",
+                   style="Green.TButton",
+                   command=_close_guide).pack(side="right", padx=16)
+
+        dlg.protocol("WM_DELETE_WINDOW", _close_guide)
+        dlg.bind("<Escape>", lambda e: _close_guide())
+        txt.bind("<MouseWheel>",
+                 lambda e: txt.yview_scroll(int(-1 * (e.delta / 120)), "units"))
+
 
 # ========================= MAIN =========================
 if __name__ == '__main__':
     load_custom_commands()
+    load_user_mgmt()
     _update_splash(97, "Building interface...")
 
     # Reuse the hidden host root that was created alongside the splash.
@@ -3158,6 +4439,8 @@ if __name__ == '__main__':
     time.sleep(0.25)    # let the user see 100% for a moment
     _close_splash()     # destroy splash Toplevel
     root.deiconify()    # NOW show the fully-built main window
+
+    app.show_welcome_guide()   # show user guide on first launch
 
     start_tray_icon()
 
