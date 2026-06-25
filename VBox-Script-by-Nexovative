@@ -3007,7 +3007,7 @@ class UltraBotGUI:
                    command=self._add_step).pack(side="left")
 
         # Hint label
-        hint = ("combo: win+r  |  send: notepad.exe  |  wait: 500 (ms)  |  "
+        hint = ("combo: win+r  |  send: notepad.exe  |  wait: 1  |  "
                 "sendenter: hello  |  key: enter  |  click / rclick")
         tk.Label(right, text=hint, bg=self.BG2, fg=self.TEXTDIM,
                  font=("Segoe UI",8), wraplength=420, justify="left"
@@ -5557,7 +5557,7 @@ class UltraBotGUI:
                 ("body", "Create custom chat commands — no coding required."),
                 ("h2",   "Quick Chain Input  (fastest)"),
                 ("body", "Type a full sequence in chat syntax in the chain field, then press  ⇨ Parse Steps:"),
-                ("code", "  !combo win+r !wait 800 !send notepad.exe !key enter"),
+                ("code", "  !combo win+r !wait 1 !send notepad.exe !key enter"),
                 ("body", "This generates a 4-step command instantly."),
                 ("h2",   "Step-by-step"),
                 ("body", "1.  Click  ＋ New  to start fresh."),
