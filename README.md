@@ -14,3 +14,9 @@
 
 *pip install vncdotool*
 
+*pip install plyer*
+
+*pip install pystray*
+
+*pip install obsws-python*
+
