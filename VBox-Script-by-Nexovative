@@ -44,7 +44,7 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & AUTO-UPDATE =========================
-VERSION = "29.2.0"   # increment this with every release
+VERSION = "29.3.0"   # increment this with every release
 
 # Replace these two URLs with your own GitHub repo paths.
 # GITHUB_VERSION_URL  → raw URL of version.json in your repo
@@ -278,6 +278,17 @@ try:
 except ImportError:
     _PYSTRAY_OK = False
     print("[Tray] pystray/Pillow not installed — system tray disabled. Run: pip install pystray pillow")
+
+try:
+    import pyautogui
+    pyautogui.FAILSAFE   = True   # move mouse to top-left corner to abort
+    pyautogui.PAUSE      = 0.05   # small delay between actions for stability
+    _PYAUTOGUI_OK = True
+except ImportError:
+    pyautogui     = None
+    _PYAUTOGUI_OK = False
+    print("[RealPC] pyautogui not installed — Real PC Control tab will show install prompt. "
+          "Run: pip install pyautogui")
 
 _update_splash(80, "Initializing VirtualBox manager...")
 
@@ -617,6 +628,377 @@ YOUTUBE_API_KEY    = ""   # Optional: paste your YouTube Data API v3 key here fo
 # Global bot state (set at runtime from GUI)
 VIDEO_ID = ""
 VM_NAME  = ""
+
+# ========================= REAL PC CONTROL =========================
+REALPC_CONFIG_FILE = "realpc_config.json"
+REALPC_CONFIG = {
+    "video_id":          "",       # YouTube video ID to listen on
+    "enabled":           False,    # master on/off switch
+    "failsafe":          True,     # pyautogui failsafe (mouse to corner = abort)
+    "action_delay":      0.05,     # seconds between pyautogui calls
+    "cooldown":          1.0,      # per-user cooldown in seconds
+    "whitelist_only":    False,    # only allow whitelisted users
+    "whitelist":         [],       # list of allowed usernames
+    "blocked":           [],       # list of blocked usernames
+    "allowed_actions":   {         # which action categories are enabled
+        "keyboard":   True,
+        "mouse":      True,
+        "screenshot": True,
+        "combo":      True,
+    },
+    "mouse_step":        50,       # pixels per !moverel step
+    "scroll_step":       3,        # clicks per !scroll
+    "max_type_length":   100,      # max chars per !type command
+}
+
+_realpc_bot_thread   = None
+_realpc_stop_event   = threading.Event()
+_realpc_user_cd      = {}          # {username: last_action_time}
+_realpc_cd_lock      = threading.Lock()
+_realpc_status_cb    = None        # GUI callback to update status label
+
+
+def load_realpc_config():
+    global REALPC_CONFIG
+    try:
+        if os.path.exists(REALPC_CONFIG_FILE):
+            with open(REALPC_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            REALPC_CONFIG.update(data)
+            print("[RealPC] Config loaded.")
+    except Exception as e:
+        print(f"[RealPC] Load error: {e}")
+
+
+def save_realpc_config():
+    try:
+        with open(REALPC_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(REALPC_CONFIG, f, indent=2)
+        print("[RealPC] Config saved.")
+    except Exception as e:
+        print(f"[RealPC] Save error: {e}")
+
+
+def _realpc_set_status(msg: str):
+    if _realpc_status_cb:
+        try:
+            _realpc_status_cb(msg)
+        except Exception:
+            pass
+    print(f"[RealPC] {msg}")
+
+
+def _realpc_check_cooldown(username: str) -> bool:
+    """Return True if the user is allowed to act (not on cooldown)."""
+    cd = REALPC_CONFIG.get("cooldown", 1.0)
+    now = time.time()
+    with _realpc_cd_lock:
+        last = _realpc_user_cd.get(username, 0)
+        if now - last < cd:
+            return False
+        _realpc_user_cd[username] = now
+    return True
+
+
+def _realpc_execute(username: str, action: str, args: str):
+    """
+    Execute a single Real-PC command.
+    action : command name without !  (e.g. 'type', 'click', 'combo')
+    args   : everything after the command word
+    """
+    if not _PYAUTOGUI_OK:
+        return
+
+    allowed = REALPC_CONFIG.get("allowed_actions", {})
+
+    try:
+        # ── Wait / Sleep ──
+        if action in ("wait", "sleep", "delay"):
+            try:
+                seconds = max(0.0, min(10.0, float(args.strip())))
+            except (ValueError, AttributeError):
+                seconds = 0.5
+            time.sleep(seconds)
+            _append_event("REALPC_CMD", username, f"wait {seconds}s")
+
+        # ── Keyboard ──
+        elif action in ("type", "write", "text", "say"):
+            if not allowed.get("keyboard", True):
+                return
+            text = args[:REALPC_CONFIG.get("max_type_length", 100)]
+            pyautogui.write(text, interval=0.03)
+            _append_event("REALPC_CMD", username, f"type: {text!r}")
+
+        elif action in ("key", "press"):
+            if not allowed.get("keyboard", True):
+                return
+            key = args.strip().lower()
+            if key:
+                pyautogui.press(key)
+                _append_event("REALPC_CMD", username, f"key: {key}")
+
+        elif action in ("combo", "hotkey"):
+            if not allowed.get("combo", True):
+                return
+            keys = [k.strip() for k in args.replace("+", " ").split() if k.strip()]
+            if keys:
+                pyautogui.hotkey(*keys)
+                _append_event("REALPC_CMD", username, f"combo: {'+'.join(keys)}")
+
+        elif action == "enter":
+            if not allowed.get("keyboard", True):
+                return
+            pyautogui.press("enter")
+            _append_event("REALPC_CMD", username, "enter")
+
+        elif action == "space":
+            if not allowed.get("keyboard", True):
+                return
+            pyautogui.press("space")
+            _append_event("REALPC_CMD", username, "space")
+
+        elif action == "backspace":
+            if not allowed.get("keyboard", True):
+                return
+            pyautogui.press("backspace")
+            _append_event("REALPC_CMD", username, "backspace")
+
+        elif action in ("send", "sendline", "typeenter"):
+            if not allowed.get("keyboard", True):
+                return
+            text = args[:REALPC_CONFIG.get("max_type_length", 100)]
+            pyautogui.write(text, interval=0.03)
+            pyautogui.press("enter")
+            _append_event("REALPC_CMD", username, f"send: {text!r}")
+
+        # ── Mouse ──
+        elif action in ("click", "lclick"):
+            if not allowed.get("mouse", True):
+                return
+            nums = _parse_two_ints(args)
+            if nums:
+                pyautogui.click(nums[0], nums[1])
+            else:
+                pyautogui.click()
+            _append_event("REALPC_CMD", username, f"click {args.strip()}")
+
+        elif action in ("rclick", "rightclick"):
+            if not allowed.get("mouse", True):
+                return
+            nums = _parse_two_ints(args)
+            if nums:
+                pyautogui.rightClick(nums[0], nums[1])
+            else:
+                pyautogui.rightClick()
+            _append_event("REALPC_CMD", username, f"rclick {args.strip()}")
+
+        elif action in ("dclick", "doubleclick"):
+            if not allowed.get("mouse", True):
+                return
+            nums = _parse_two_ints(args)
+            if nums:
+                pyautogui.doubleClick(nums[0], nums[1])
+            else:
+                pyautogui.doubleClick()
+            _append_event("REALPC_CMD", username, f"dclick {args.strip()}")
+
+        elif action in ("move", "moveto", "abs", "cursor", "moveabs"):
+            if not allowed.get("mouse", True):
+                return
+            nums = _parse_two_ints(args)
+            if nums:
+                pyautogui.moveTo(nums[0], nums[1], duration=0.2)
+                _append_event("REALPC_CMD", username, f"move {nums[0]} {nums[1]}")
+
+        elif action in ("moverel", "mv", "rel"):
+            if not allowed.get("mouse", True):
+                return
+            step = REALPC_CONFIG.get("mouse_step", 50)
+            direction = args.strip().lower()
+            dx, dy = 0, 0
+            if   direction in ("up",    "u"): dy = -step
+            elif direction in ("down",  "d"): dy =  step
+            elif direction in ("left",  "l"): dx = -step
+            elif direction in ("right", "r"): dx =  step
+            else:
+                nums = _parse_two_ints(args)
+                if nums: dx, dy = nums[0], nums[1]
+            if dx or dy:
+                pyautogui.moveRel(dx, dy, duration=0.15)
+                _append_event("REALPC_CMD", username, f"moverel {dx} {dy}")
+
+        elif action in ("scroll", "wheel"):
+            if not allowed.get("mouse", True):
+                return
+            try:
+                amount = int(args.strip()) if args.strip() else REALPC_CONFIG.get("scroll_step", 3)
+            except ValueError:
+                amount = REALPC_CONFIG.get("scroll_step", 3)
+            pyautogui.scroll(amount)
+            _append_event("REALPC_CMD", username, f"scroll {amount}")
+
+        elif action in ("drag", "dragrel"):
+            if not allowed.get("mouse", True):
+                return
+            nums = _parse_two_ints(args)
+            if nums:
+                pyautogui.dragRel(nums[0], nums[1], duration=0.3, button="left")
+                _append_event("REALPC_CMD", username, f"drag {nums[0]} {nums[1]}")
+
+        # ── Screenshot ──
+        elif action in ("screenshot", "ss", "snap"):
+            if not allowed.get("screenshot", True):
+                return
+            img   = pyautogui.screenshot()
+            fname = f"realpc_screenshot_{int(time.time())}.png"
+            img.save(fname)
+            _realpc_set_status(f"Screenshot saved: {fname}")
+            _append_event("REALPC_CMD", username, f"screenshot → {fname}")
+
+        # ── Info ──
+        elif action in ("pos", "position", "cursor"):
+            x, y = pyautogui.position()
+            _realpc_set_status(f"Cursor: x={x}  y={y}")
+            _append_event("REALPC_CMD", username, f"pos → {x},{y}")
+
+        elif action in ("size", "screen", "resolution"):
+            w, h = pyautogui.size()
+            _realpc_set_status(f"Screen: {w}×{h}")
+            _append_event("REALPC_CMD", username, f"size → {w}x{h}")
+
+        else:
+            print(f"[RealPC] Unknown command '!{action}' from {username}")
+
+    except pyautogui.FailSafeException:
+        _realpc_set_status("FAILSAFE triggered — mouse moved to corner.")
+        _append_event("REALPC_FAILSAFE", username, "failsafe triggered")
+    except Exception as e:
+        print(f"[RealPC] Execute error (!{action}): {e}")
+        _append_event("REALPC_ERROR", username, f"!{action}: {e}")
+
+
+def _parse_two_ints(s: str):
+    """Parse 'x y' or 'x,y' from a string. Returns (x, y) tuple or None."""
+    try:
+        nums = [int(n) for n in re.split(r"[\s,]+", s.strip()) if n]
+        if len(nums) >= 2:
+            return nums[0], nums[1]
+    except (ValueError, AttributeError):
+        pass
+    return None
+
+
+def _realpc_bot_loop():
+    """Background thread: connects to YouTube chat and processes !command style messages."""
+    vid = REALPC_CONFIG.get("video_id", "").strip()
+    if not vid:
+        _realpc_set_status("No Video ID configured.")
+        return
+    if not _PYAUTOGUI_OK:
+        _realpc_set_status("pyautogui not installed. Run: pip install pyautogui")
+        return
+
+    wl_only   = REALPC_CONFIG.get("whitelist_only", False)
+    whitelist = {u.lower() for u in REALPC_CONFIG.get("whitelist", [])}
+    blocked   = {u.lower() for u in REALPC_CONFIG.get("blocked",   [])}
+
+    pyautogui.FAILSAFE = REALPC_CONFIG.get("failsafe", True)
+    pyautogui.PAUSE    = REALPC_CONFIG.get("action_delay", 0.05)
+
+    _realpc_set_status(f"Connecting to stream: {vid}")
+    chat = None
+    try:
+        chat = pytchat.create(video_id=vid)
+    except Exception as e:
+        _realpc_set_status(f"Connection failed: {e}")
+        return
+
+    _realpc_set_status("Listening — commands: !type  !send  !combo  !click  !move  etc.")
+
+    while not _realpc_stop_event.is_set():
+        if not chat.is_alive():
+            _realpc_set_status("Chat ended or disconnected.")
+            break
+        try:
+            for msg_obj in chat.get().sync_items():
+                if _realpc_stop_event.is_set():
+                    break
+
+                user = msg_obj.author.name.strip().lower()
+                msg  = msg_obj.message.strip()
+
+                if not msg or not msg.startswith("!"):
+                    continue
+                if user in blocked:
+                    continue
+                if wl_only and user not in whitelist:
+                    continue
+                if not _realpc_check_cooldown(user):
+                    continue
+
+                # Chain parse: split on "!" boundaries to support
+                # "!combo win+r !wait 1 !send cmd" style messages
+                # Split on every "!" that follows a space (or is at start)
+                import re as _re
+                raw_chain = msg.strip()
+                # Split at every "!" that starts a new token
+                # e.g. "!combo win+r !wait 1 !send cmd"
+                # → ["combo win+r", "wait 1", "send cmd"]
+                segments = [s.strip() for s in _re.split(r'\s+(?=!)', raw_chain)]
+                # Each segment starts with "!" — strip it
+                commands = []
+                for seg in segments:
+                    if seg.startswith("!"):
+                        seg = seg[1:].strip()
+                    if not seg:
+                        continue
+                    parts  = seg.split(maxsplit=1)
+                    action = parts[0].lower()
+                    args   = parts[1] if len(parts) > 1 else ""
+                    commands.append((action, args))
+
+                if not commands:
+                    continue
+
+                chain_str = "  →  ".join(
+                    f"!{a} {g}".strip() for a, g in commands)
+                _append_event("REALPC_MSG", user, chain_str)
+
+                def _run_chain(cmds=commands, u=user):
+                    for action, args in cmds:
+                        if _realpc_stop_event.is_set():
+                            break
+                        _realpc_execute(u, action, args)
+
+                threading.Thread(target=_run_chain, daemon=True).start()
+
+        except Exception as e:
+            if not _realpc_stop_event.is_set():
+                print(f"[RealPC] Loop error: {e}")
+
+        if _realpc_stop_event.wait(0.05):
+            break
+
+    if chat:
+        try: chat.terminate()
+        except Exception: pass
+    _realpc_set_status("Stopped.")
+
+
+def start_realpc_bot():
+    global _realpc_bot_thread
+    if _realpc_bot_thread and _realpc_bot_thread.is_alive():
+        return False
+    _realpc_stop_event.clear()
+    _realpc_bot_thread = threading.Thread(
+        target=_realpc_bot_loop, daemon=True, name="realpc_bot"
+    )
+    _realpc_bot_thread.start()
+    return True
+
+
+def stop_realpc_bot():
+    _realpc_stop_event.set()
 
 # ========================= EVENT LOG =========================
 EVENT_LOG_FILE = "event_log.json"
@@ -2542,7 +2924,7 @@ class UltraBotGUI:
             background=self.BG, tabmargins=[2, 4, 0, 0])
         style.configure("TNotebook.Tab",
             background=self.BG2, foreground=self.TEXTDIM,
-            padding=[8, 5], font=("Segoe UI", fs, "bold"))
+            padding=[5, 4], font=("Segoe UI", fs))
         style.map("TNotebook.Tab",
             background=[("selected", self.BG3)],
             foreground=[("selected", self.TEXT)])
@@ -2662,19 +3044,21 @@ class UltraBotGUI:
         tab11 = ttk.Frame(nb)
         tab12 = ttk.Frame(nb)
         tab13 = ttk.Frame(nb)
+        tab14 = ttk.Frame(nb)
         nb.add(tab1,  text="▶ Main")
-        nb.add(tab2,  text="⚙ Commands")
-        nb.add(tab3,  text="🖥 VM Controls")
-        nb.add(tab4,  text="🗳 OS Voting")
-        nb.add(tab5,  text="🎨 Appearance")
+        nb.add(tab2,  text="⚙ Cmds")
+        nb.add(tab3,  text="🖥 VM")
+        nb.add(tab4,  text="🗳 OS Vote")
+        nb.add(tab5,  text="🎨 Theme")
         nb.add(tab6,  text="📡 OBS")
-        nb.add(tab7,  text="📊 Statistics")
+        nb.add(tab7,  text="📊 Stats")
         nb.add(tab8,  text="🚫 Users")
-        nb.add(tab9,  text="📋 Event Log")
-        nb.add(tab10, text="🔒 Permissions")
-        nb.add(tab11, text="🔊 Sound & TTS")
-        nb.add(tab12, text="🌐 Multi-Stream")
-        nb.add(tab13, text="📅 Scheduler")
+        nb.add(tab9,  text="📋 Log")
+        nb.add(tab10, text="🔒 Perms")
+        nb.add(tab11, text="🔊 Sound")
+        nb.add(tab12, text="🌐 Streams")
+        nb.add(tab13, text="📅 Sched")
+        nb.add(tab14, text="🖱 Real PC")
 
         self._build_main_tab(tab1)
         self._build_cmd_builder_tab(tab2)
@@ -2689,6 +3073,7 @@ class UltraBotGUI:
         self._build_sound_tts_tab(tab11)
         self._build_multi_stream_tab(tab12)
         self._build_scheduler_tab(tab13)
+        self._build_realpc_tab(tab14)
         self._sync_main_vm_lock()
         self._nb = nb   # store reference for unsaved-changes guard
         self._bind_context_menus()   # attach right-click menus to all Entry/Text widgets
@@ -5424,6 +5809,545 @@ class UltraBotGUI:
         self._clear_dirty(12)
         self._log("[Scheduler] Tasks saved.")
 
+    # ──────────────── TAB 14 : REAL PC CONTROL ────────────────
+    def _build_realpc_tab(self, parent):
+        parent.configure(style="TFrame")
+
+        # ── Header ──
+        hdr = tk.Frame(parent, bg=self.BG)
+        hdr.pack(fill="x", padx=16, pady=(14, 4))
+        tk.Label(hdr, text="🖱  Real PC Control",
+                 bg=self.BG, fg=self.ACCENT,
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        tk.Label(hdr,
+                 text="Let YouTube chat control THIS computer with pyautogui — "
+                      "keyboard, mouse, hotkeys and more.",
+                 bg=self.BG, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
+
+        # ── pyautogui missing warning ──
+        if not _PYAUTOGUI_OK:
+            warn_card = ttk.Frame(parent, style="Card.TFrame", padding=20)
+            warn_card.pack(fill="x", padx=12, pady=12)
+            tk.Label(warn_card,
+                     text="⚠  pyautogui is not installed.",
+                     bg=self.BG2, fg=self.YELLOW,
+                     font=("Segoe UI", 11, "bold")).pack(anchor="w")
+            tk.Label(warn_card,
+                     text="Run the following command in a terminal, then restart the bot:",
+                     bg=self.BG2, fg=self.TEXT,
+                     font=("Segoe UI", 9)).pack(anchor="w", pady=(6, 4))
+            tk.Label(warn_card,
+                     text="    pip install pyautogui",
+                     bg=self.BG3, fg=self.ACCENT,
+                     font=("Courier New", 11, "bold")).pack(
+                     anchor="w", padx=8, pady=4)
+            return   # nothing else to build
+
+        # ── Scrollable body ──
+        canvas  = tk.Canvas(parent, bg=self.BG, highlightthickness=0)
+        vscroll = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        vscroll.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(canvas, bg=self.BG)
+        _inner_win = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_cfg(e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        def _on_canvas_cfg(e):
+            canvas.itemconfig(_inner_win, width=e.width)
+        def _on_wheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+
+        inner.bind("<Configure>",  _on_inner_cfg)
+        canvas.bind("<Configure>", _on_canvas_cfg)
+        canvas.bind("<MouseWheel>", _on_wheel)
+        inner.bind("<MouseWheel>",  _on_wheel)
+
+        # ── Connection card ──
+        conn_card = ttk.Frame(inner, style="Card.TFrame", padding=14)
+        conn_card.pack(fill="x", padx=12, pady=(10, 6))
+        conn_card.bind("<MouseWheel>", _on_wheel)
+
+        tk.Label(conn_card, text="Stream Connection",
+                 bg=self.BG2, fg=self.ACCENT,
+                 font=("Segoe UI", 10, "bold")).grid(
+                 row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+
+        tk.Label(conn_card, text="YouTube Video ID:",
+                 bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 9)).grid(row=1, column=0, sticky="w", padx=(0, 10))
+        self._rpc_vid_var = tk.StringVar(value=REALPC_CONFIG.get("video_id", ""))
+        ttk.Entry(conn_card, textvariable=self._rpc_vid_var,
+                  width=30, font=("Segoe UI Mono", 10)).grid(
+                  row=1, column=1, sticky="ew", ipady=4, padx=(0, 10))
+        tk.Label(conn_card,
+                 text="Can be the same as the main bot or a different stream.",
+                 bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8)).grid(row=2, column=1, sticky="w", pady=(2, 0))
+
+        tk.Label(conn_card,
+                 text="Commands: !type  !send  !combo  !click  !move  !scroll  etc.\n"
+                      "Every message starting with ! is parsed as a command — no prefix needed.",
+                 bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8)).grid(
+                 row=3, column=0, columnspan=3, sticky="w", pady=(10, 0))
+
+        conn_card.columnconfigure(1, weight=1)
+
+        # ── Start / Stop buttons ──
+        ctrl_row = tk.Frame(inner, bg=self.BG)
+        ctrl_row.pack(fill="x", padx=12, pady=(4, 4))
+
+        self._rpc_start_btn = ttk.Button(ctrl_row, text="▶ Start Real PC Bot",
+                                          style="Green.TButton",
+                                          command=self._rpc_start)
+        self._rpc_start_btn.pack(side="left", padx=(0, 8))
+
+        self._rpc_stop_btn = ttk.Button(ctrl_row, text="⏹ Stop",
+                                         style="Red.TButton",
+                                         command=self._rpc_stop)
+        self._rpc_stop_btn.pack(side="left")
+
+        self._rpc_status_lbl = tk.Label(ctrl_row, text="⬤  Stopped",
+                                         bg=self.BG, fg=self.RED,
+                                         font=("Segoe UI", 9, "bold"))
+        self._rpc_status_lbl.pack(side="left", padx=(14, 0))
+
+        # Wire status callback
+        def _set_rpc_status(msg: str):
+            color = self.GREEN if "Listen" in msg or "Connect" in msg else (
+                    self.YELLOW if "FAILSAFE" in msg or "fail" in msg.lower() else
+                    self.TEXTDIM)
+            try:
+                self.root.after(0, lambda m=msg, c=color:
+                    self._rpc_status_lbl.configure(text=f"⬤  {m}", fg=c))
+            except Exception:
+                pass
+
+        global _realpc_status_cb
+        _realpc_status_cb = _set_rpc_status
+
+        # ── Settings card ──
+        settings_card = ttk.Frame(inner, style="Card.TFrame", padding=14)
+        settings_card.pack(fill="x", padx=12, pady=(0, 6))
+        settings_card.bind("<MouseWheel>", _on_wheel)
+
+        tk.Label(settings_card, text="Behavior Settings",
+                 bg=self.BG2, fg=self.ACCENT,
+                 font=("Segoe UI", 10, "bold")).grid(
+                 row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+
+        # Cooldown
+        tk.Label(settings_card, text="Per-user cooldown (sec):",
+                 bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 9)).grid(row=1, column=0, sticky="w", padx=(0, 8))
+        self._rpc_cd_var = tk.DoubleVar(value=REALPC_CONFIG.get("cooldown", 1.0))
+        tk.Spinbox(settings_card, textvariable=self._rpc_cd_var,
+                   from_=0.0, to=60.0, increment=0.5, width=6,
+                   bg=self.BG3, fg=self.TEXT,
+                   insertbackground=self.TEXT, buttonbackground=self.BG3,
+                   font=("Segoe UI", 10), relief="flat").grid(
+                   row=1, column=1, sticky="w", padx=(0, 20))
+
+        # Mouse step
+        tk.Label(settings_card, text="Mouse step (px):",
+                 bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 9)).grid(row=1, column=2, sticky="w", padx=(0, 8))
+        self._rpc_step_var = tk.IntVar(value=REALPC_CONFIG.get("mouse_step", 50))
+        tk.Spinbox(settings_card, textvariable=self._rpc_step_var,
+                   from_=1, to=500, width=6,
+                   bg=self.BG3, fg=self.TEXT,
+                   insertbackground=self.TEXT, buttonbackground=self.BG3,
+                   font=("Segoe UI", 10), relief="flat").grid(
+                   row=1, column=3, sticky="w")
+
+        # Max type length
+        tk.Label(settings_card, text="Max type length (chars):",
+                 bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 9)).grid(row=2, column=0, sticky="w",
+                                            padx=(0, 8), pady=(8, 0))
+        self._rpc_maxtype_var = tk.IntVar(value=REALPC_CONFIG.get("max_type_length", 100))
+        tk.Spinbox(settings_card, textvariable=self._rpc_maxtype_var,
+                   from_=1, to=500, width=6,
+                   bg=self.BG3, fg=self.TEXT,
+                   insertbackground=self.TEXT, buttonbackground=self.BG3,
+                   font=("Segoe UI", 10), relief="flat").grid(
+                   row=2, column=1, sticky="w", pady=(8, 0))
+
+        # Scroll step
+        tk.Label(settings_card, text="Scroll step (clicks):",
+                 bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 9)).grid(row=2, column=2, sticky="w",
+                                            padx=(0, 8), pady=(8, 0))
+        self._rpc_scroll_var = tk.IntVar(value=REALPC_CONFIG.get("scroll_step", 3))
+        tk.Spinbox(settings_card, textvariable=self._rpc_scroll_var,
+                   from_=1, to=50, width=6,
+                   bg=self.BG3, fg=self.TEXT,
+                   insertbackground=self.TEXT, buttonbackground=self.BG3,
+                   font=("Segoe UI", 10), relief="flat").grid(
+                   row=2, column=3, sticky="w", pady=(8, 0))
+
+        # Failsafe
+        self._rpc_failsafe_var = tk.BooleanVar(
+            value=REALPC_CONFIG.get("failsafe", True))
+        tk.Checkbutton(settings_card,
+                       text="Enable pyautogui failsafe  "
+                            "(move mouse to top-left corner to instantly stop all actions)",
+                       variable=self._rpc_failsafe_var,
+                       bg=self.BG2, fg=self.YELLOW,
+                       selectcolor=self.BG3, activebackground=self.BG2,
+                       font=("Segoe UI", 9)).grid(
+                       row=3, column=0, columnspan=4, sticky="w", pady=(10, 0))
+
+        settings_card.columnconfigure(1, weight=1)
+        settings_card.columnconfigure(3, weight=1)
+
+        # ── Allowed Actions card ──
+        allow_card = ttk.Frame(inner, style="Card.TFrame", padding=14)
+        allow_card.pack(fill="x", padx=12, pady=(0, 6))
+        allow_card.bind("<MouseWheel>", _on_wheel)
+
+        tk.Label(allow_card, text="Allowed Action Categories",
+                 bg=self.BG2, fg=self.ACCENT,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 8))
+
+        self._rpc_allow_vars = {}
+        action_rows = [
+            ("keyboard",   "⌨  Keyboard  (!type, !send, !key, !enter, !backspace, !space)"),
+            ("combo",      "🔗  Combo     (!combo win+d, !combo ctrl+c, !combo alt+f4)"),
+            ("mouse",      "🖱  Mouse     (!click, !rclick, !dclick, !move, !moverel, !scroll, !drag)"),
+            ("screenshot", "📸  Screenshot  (!screenshot / !ss — saves PNG to bot folder)"),
+        ]
+        for key, label in action_rows:
+            var = tk.BooleanVar(
+                value=REALPC_CONFIG.get("allowed_actions", {}).get(key, True))
+            self._rpc_allow_vars[key] = var
+            tk.Checkbutton(allow_card, text=label,
+                           variable=var,
+                           bg=self.BG2, fg=self.TEXT,
+                           selectcolor=self.BG3, activebackground=self.BG2,
+                           font=("Segoe UI", 9)).pack(anchor="w", pady=2)
+
+        # ── Access Control card ──
+        access_card = ttk.Frame(inner, style="Card.TFrame", padding=14)
+        access_card.pack(fill="x", padx=12, pady=(0, 6))
+        access_card.bind("<MouseWheel>", _on_wheel)
+
+        tk.Label(access_card, text="Access Control",
+                 bg=self.BG2, fg=self.ACCENT,
+                 font=("Segoe UI", 10, "bold")).grid(
+                 row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
+
+        self._rpc_wl_only_var = tk.BooleanVar(
+            value=REALPC_CONFIG.get("whitelist_only", False))
+        tk.Checkbutton(access_card,
+                       text="Whitelist only — only listed users can send commands",
+                       variable=self._rpc_wl_only_var,
+                       bg=self.BG2, fg=self.TEXT,
+                       selectcolor=self.BG3, activebackground=self.BG2,
+                       font=("Segoe UI", 9)).grid(
+                       row=1, column=0, columnspan=3, sticky="w", pady=(0, 8))
+
+        # Whitelist
+        tk.Label(access_card, text="Whitelist:",
+                 bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9, "bold")).grid(
+                 row=2, column=0, sticky="nw", padx=(0, 8))
+
+        wl_frame = tk.Frame(access_card, bg=self.BORDER, bd=1)
+        wl_frame.grid(row=2, column=1, sticky="ew", padx=(0, 8))
+        self._rpc_wl_listbox = tk.Listbox(wl_frame, height=5,
+            bg=self.BG3, fg=self.TEXT,
+            selectbackground=self.ACCENT, selectforeground="#fff",
+            font=("Segoe UI", 9), relief="flat", bd=0)
+        self._rpc_wl_listbox.pack(fill="both", expand=True)
+        for u in REALPC_CONFIG.get("whitelist", []):
+            self._rpc_wl_listbox.insert("end", u)
+
+        wl_btn_col = tk.Frame(access_card, bg=self.BG2)
+        wl_btn_col.grid(row=2, column=2, sticky="n")
+        self._rpc_wl_entry = tk.StringVar()
+        ttk.Entry(wl_btn_col, textvariable=self._rpc_wl_entry,
+                  width=16, font=("Segoe UI", 9)).pack(pady=(0, 4), ipady=3)
+        ttk.Button(wl_btn_col, text="＋ Add", style="Green.TButton",
+                   command=self._rpc_wl_add).pack(fill="x", pady=(0, 3))
+        ttk.Button(wl_btn_col, text="✕ Remove", style="Red.TButton",
+                   command=self._rpc_wl_remove).pack(fill="x")
+
+        # Blocked list
+        tk.Label(access_card, text="Blocked:",
+                 bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9, "bold")).grid(
+                 row=3, column=0, sticky="nw", padx=(0, 8), pady=(12, 0))
+
+        bl_frame = tk.Frame(access_card, bg=self.BORDER, bd=1)
+        bl_frame.grid(row=3, column=1, sticky="ew", padx=(0, 8), pady=(12, 0))
+        self._rpc_bl_listbox = tk.Listbox(bl_frame, height=4,
+            bg=self.BG3, fg=self.TEXT,
+            selectbackground=self.RED, selectforeground="#fff",
+            font=("Segoe UI", 9), relief="flat", bd=0)
+        self._rpc_bl_listbox.pack(fill="both", expand=True)
+        for u in REALPC_CONFIG.get("blocked", []):
+            self._rpc_bl_listbox.insert("end", u)
+
+        bl_btn_col = tk.Frame(access_card, bg=self.BG2)
+        bl_btn_col.grid(row=3, column=2, sticky="n", pady=(12, 0))
+        self._rpc_bl_entry = tk.StringVar()
+        ttk.Entry(bl_btn_col, textvariable=self._rpc_bl_entry,
+                  width=16, font=("Segoe UI", 9)).pack(pady=(0, 4), ipady=3)
+        ttk.Button(bl_btn_col, text="🚫 Block", style="Red.TButton",
+                   command=self._rpc_bl_add).pack(fill="x", pady=(0, 3))
+        ttk.Button(bl_btn_col, text="✕ Remove", style="Dim.TButton",
+                   command=self._rpc_bl_remove).pack(fill="x")
+
+        access_card.columnconfigure(1, weight=1)
+
+        # ── Command Reference card ──
+        ref_card = ttk.Frame(inner, style="Card.TFrame", padding=14)
+        ref_card.pack(fill="x", padx=12, pady=(0, 6))
+        ref_card.bind("<MouseWheel>", _on_wheel)
+
+        tk.Label(ref_card, text="Command Reference",
+                 bg=self.BG2, fg=self.ACCENT,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 6))
+
+        CMD_HELP = (
+            "Commands work exactly like the main bot — just type !command in chat.\n"
+            "No prefix needed. Every message starting with ! is parsed as a command.\n\n"
+            "CHAIN COMMANDS  (multiple commands in one message)\n"
+            "  !combo win+r !wait 1 !send cmd !wait 0.5 !key enter\n"
+            "  !click 960 540 !wait 0.3 !type hello !enter\n"
+            "  Commands execute left-to-right in order.\n\n"
+            "WAIT / DELAY\n"
+            "  !wait 1              — wait 1 second before next command  (max 10s)\n"
+            "  !wait 0.5            — wait 500ms\n"
+            "  !sleep 2             — same as !wait\n\n"
+            "KEYBOARD\n"
+            "  !type hello world    — types text into the focused window\n"
+            "  !send hello          — types text then presses Enter\n"
+            "  !key enter           — presses a single key  (enter, esc, tab, f1…f12, etc.)\n"
+            "  !enter               — shortcut for pressing Enter\n"
+            "  !space               — shortcut for pressing Space\n"
+            "  !backspace           — deletes last character\n\n"
+            "COMBO  (key combinations)\n"
+            "  !combo win+r         — opens Run dialog\n"
+            "  !combo win+d         — shows desktop\n"
+            "  !combo ctrl+c        — copy\n"
+            "  !combo ctrl+v        — paste\n"
+            "  !combo alt+f4        — closes focused window\n"
+            "  !combo ctrl+shift+esc — opens Task Manager\n\n"
+            "MOUSE\n"
+            "  !click               — left-click at current cursor position\n"
+            "  !click 960 540       — left-click at x=960 y=540\n"
+            "  !rclick              — right-click\n"
+            "  !dclick              — double-click\n"
+            "  !move 960 540        — move cursor to exact coordinates\n"
+            "  !moverel up          — move cursor up by step pixels  (step set in Settings)\n"
+            "  !moverel down / left / right\n"
+            "  !moverel 100 -50     — move cursor by +100x -50y\n"
+            "  !scroll 3            — scroll up 3 clicks\n"
+            "  !scroll -3           — scroll down 3 clicks\n"
+            "  !drag 200 0          — drag mouse 200px right\n\n"
+            "SCREENSHOT & INFO\n"
+            "  !screenshot          — saves a PNG to the bot folder\n"
+            "  !ss                  — same as !screenshot\n"
+            "  !pos                 — prints current cursor position to status bar\n"
+            "  !size                — prints screen resolution to status bar\n"
+        )
+
+        ref_txt = tk.Text(ref_card, height=22, bg=self.BG3, fg=self.TEXTDIM,
+                          font=("Courier New", 9), relief="flat", bd=0,
+                          wrap="none", state="normal")
+        ref_txt.insert("1.0", CMD_HELP)
+        ref_txt.configure(state="disabled")
+        ref_txt.pack(fill="x")
+        ref_txt.bind("<MouseWheel>", _on_wheel)
+
+        # ── Live log card ──
+        log_card = ttk.Frame(inner, style="Card.TFrame", padding=14)
+        log_card.pack(fill="x", padx=12, pady=(0, 12))
+        log_card.bind("<MouseWheel>", _on_wheel)
+
+        tk.Label(log_card, text="Live Action Log",
+                 bg=self.BG2, fg=self.ACCENT,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 6))
+
+        self._rpc_log = tk.Text(log_card, height=8,
+                                bg=self.BG3, fg=self.TEXT,
+                                font=("Courier New", 9), relief="flat", bd=0,
+                                state="disabled", wrap="word")
+        self._rpc_log.pack(fill="x")
+        self._rpc_log.bind("<MouseWheel>", _on_wheel)
+
+        ttk.Button(log_card, text="🗑 Clear Log", style="Dim.TButton",
+                   command=lambda: (
+                       self._rpc_log.configure(state="normal"),
+                       self._rpc_log.delete("1.0", "end"),
+                       self._rpc_log.configure(state="disabled")
+                   )).pack(anchor="e", pady=(6, 0))
+
+        # ── Save button ──
+        save_row = tk.Frame(inner, bg=self.BG)
+        save_row.pack(fill="x", padx=12, pady=(0, 14))
+        ttk.Button(save_row, text="💾 Save Real PC Config",
+                   style="Green.TButton",
+                   command=self._rpc_save).pack(side="left")
+
+        # Wire live log to event log entries tagged REALPC_*
+        self._rpc_log_callback_active = True
+        self._start_rpc_log_poller()
+
+    def _start_rpc_log_poller(self):
+        """Poll event log every 500ms and append new REALPC_* entries to the live log."""
+        self._rpc_last_log_len = 0
+
+        def _poll():
+            if not getattr(self, "_rpc_log_callback_active", False):
+                return
+            try:
+                with _event_log_lock:
+                    entries = list(_event_log)
+                new_entries = entries[self._rpc_last_log_len:]
+                self._rpc_last_log_len = len(entries)
+                for e in new_entries:
+                    if e.get("type", "").startswith("REALPC"):
+                        line = (f"[{e['ts']}]  {e['user']:<20}  "
+                                f"{e['type']:<18}  {e['detail']}\n")
+                        self._rpc_log.configure(state="normal")
+                        self._rpc_log.insert("end", line)
+                        self._rpc_log.see("end")
+                        self._rpc_log.configure(state="disabled")
+            except Exception:
+                pass
+            self.root.after(500, _poll)
+
+        self.root.after(500, _poll)
+
+    def _rpc_start(self):
+        # ── 3-step safety confirmation ──
+        # Warning 1
+        if not messagebox.askokcancel(
+            "⚠  Real PC Control — Warning 1 of 3",
+            "You are about to give YouTube CHAT viewers direct control\n"
+            "over THIS computer's keyboard and mouse.\n\n"
+            "Anyone watching your stream will be able to:\n"
+            "  • Type text into any open window\n"
+            "  • Click and move your mouse\n"
+            "  • Open programs, close windows, press key combos\n\n"
+            "Make sure you understand the risks before continuing.\n\n"
+            "Click OK to proceed to the next warning, or Cancel to abort.",
+            icon="warning"
+        ):
+            return
+
+        # Warning 2
+        if not messagebox.askokcancel(
+            "⚠  Real PC Control — Warning 2 of 3",
+            "SECURITY RISK — READ CAREFULLY:\n\n"
+            "• Viewers can type into password fields, browsers, terminals\n"
+            "• Viewers can close or crash applications on your PC\n"
+            "• Viewers can attempt to open Run dialogs, CMD, PowerShell\n"
+            "• There is NO undo — actions execute instantly on your machine\n\n"
+            "Recommended precautions:\n"
+            "  ✔  Use the Whitelist to restrict who can send commands\n"
+            "  ✔  Enable Failsafe (move mouse to top-left corner to stop)\n"
+            "  ✔  Close sensitive apps (browser, email, file manager) first\n"
+            "  ✔  Disable the Combo category if you don't want hotkeys used\n\n"
+            "Click OK to proceed to the final confirmation, or Cancel to abort.",
+            icon="warning"
+        ):
+            return
+
+        # Warning 3 — final "I accept responsibility" confirmation
+        if not messagebox.askokcancel(
+            "⚠  Real PC Control — Warning 3 of 3  (Final)",
+            "FINAL CONFIRMATION:\n\n"
+            "By clicking OK you confirm that:\n\n"
+            "  • You take FULL responsibility for any actions\n"
+            "    performed on this computer through chat commands.\n\n"
+            "  • The developer (Nexovative) is NOT responsible\n"
+            "    for any damage, data loss, privacy breach, or\n"
+            "    unintended consequences caused by this feature.\n\n"
+            "  • You are aware this is an ADVANCED feature and you\n"
+            "    have taken the necessary precautions.\n\n"
+            "Click OK to START Real PC Control, or Cancel to abort.",
+            icon="warning"
+        ):
+            return
+
+        # All 3 warnings accepted — proceed
+        self._rpc_collect_to_config()
+        save_realpc_config()
+        if not REALPC_CONFIG.get("video_id", "").strip():
+            messagebox.showwarning("Missing", "Enter a YouTube Video ID first.")
+            return
+        if start_realpc_bot():
+            self._rpc_status_lbl.configure(
+                text="⬤  Starting...", fg=self.YELLOW)
+        else:
+            messagebox.showinfo("Already Running",
+                                "Real PC bot is already running.")
+
+    def _rpc_stop(self):
+        stop_realpc_bot()
+        self._rpc_status_lbl.configure(text="⬤  Stopped", fg=self.RED)
+
+    def _rpc_save(self):
+        self._rpc_collect_to_config()
+        save_realpc_config()
+        messagebox.showinfo("Saved", "Real PC Control config saved.")
+
+    def _rpc_collect_to_config(self):
+        """Read all GUI widgets and push values into REALPC_CONFIG."""
+        REALPC_CONFIG["video_id"]       = self._rpc_vid_var.get().strip()
+        REALPC_CONFIG["failsafe"]       = self._rpc_failsafe_var.get()
+        REALPC_CONFIG["whitelist_only"] = self._rpc_wl_only_var.get()
+        try:
+            REALPC_CONFIG["cooldown"] = max(0.0, float(self._rpc_cd_var.get()))
+        except (ValueError, tk.TclError):
+            pass
+        try:
+            REALPC_CONFIG["mouse_step"] = max(1, int(self._rpc_step_var.get()))
+        except (ValueError, tk.TclError):
+            pass
+        try:
+            REALPC_CONFIG["scroll_step"] = max(1, int(self._rpc_scroll_var.get()))
+        except (ValueError, tk.TclError):
+            pass
+        try:
+            REALPC_CONFIG["max_type_length"] = max(1, int(self._rpc_maxtype_var.get()))
+        except (ValueError, tk.TclError):
+            pass
+        REALPC_CONFIG["allowed_actions"] = {
+            k: v.get() for k, v in self._rpc_allow_vars.items()
+        }
+        REALPC_CONFIG["whitelist"] = list(self._rpc_wl_listbox.get(0, "end"))
+        REALPC_CONFIG["blocked"]   = list(self._rpc_bl_listbox.get(0, "end"))
+
+    def _rpc_wl_add(self):
+        user = self._rpc_wl_entry.get().strip().lstrip("@").lower()
+        if user and user not in self._rpc_wl_listbox.get(0, "end"):
+            self._rpc_wl_listbox.insert("end", user)
+        self._rpc_wl_entry.set("")
+
+    def _rpc_wl_remove(self):
+        sel = self._rpc_wl_listbox.curselection()
+        if sel:
+            self._rpc_wl_listbox.delete(sel[0])
+
+    def _rpc_bl_add(self):
+        user = self._rpc_bl_entry.get().strip().lstrip("@").lower()
+        if user and user not in self._rpc_bl_listbox.get(0, "end"):
+            self._rpc_bl_listbox.insert("end", user)
+        self._rpc_bl_entry.set("")
+
+    def _rpc_bl_remove(self):
+        sel = self._rpc_bl_listbox.curselection()
+        if sel:
+            self._rpc_bl_listbox.delete(sel[0])
+
     # ──────────────── Welcome / User Guide ────────────────
     GUIDE_FLAG_FILE = "guide_seen.flag"
 
@@ -5843,6 +6767,7 @@ if __name__ == '__main__':
     load_sound_config()
     load_multi_stream_config()
     load_scheduler_config()
+    load_realpc_config()
     _update_splash(97, "Building interface...")
 
     # Reuse the hidden host root that was created alongside the splash.
@@ -5880,6 +6805,7 @@ if __name__ == '__main__':
             notify("Running in Tray", "Bot is still running. Right-click the tray icon to exit.")
         elif answer == IDNO:
             bot_stop_event.set()
+            stop_realpc_bot()
             stop_tray_icon()
             root.destroy()
             os._exit(0)
