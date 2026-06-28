@@ -44,7 +44,7 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & AUTO-UPDATE =========================
-VERSION = "29.5.0"   # increment this with every release
+VERSION = "29.6.0"   # increment this with every release
 
 # Replace these two URLs with your own GitHub repo paths.
 # GITHUB_VERSION_URL  → raw URL of version.json in your repo
@@ -1056,9 +1056,10 @@ def load_event_log():
 PERMISSIONS_CONFIG_FILE = "permissions_config.json"
 # Default required-votes table (overridden by GUI / config file)
 PERMISSIONS_CONFIG = {
-    "restart_votes": 2,
-    "revert_votes":  2,
-    "ban_votes":     3,
+    "restart_votes":   2,
+    "revert_votes":    2,
+    "ban_votes":       3,
+    "action_cooldown": 60,   # seconds between restart/revert actions
 }
 
 def load_permissions_config():
@@ -2444,6 +2445,7 @@ class YouTubeChatBot:
                                 if current_time < restart_cooldown_until:
                                     remaining_cd = int(restart_cooldown_until - current_time)
                                     print(f"[Vote] Restart on cooldown ({remaining_cd}s left)")
+                                    _append_event("COOLDOWN", user, f"restart blocked — {remaining_cd}s left")
                                     continue
                                 # Owner bypass: skip vote, execute immediately
                                 if is_owner:
@@ -2459,7 +2461,7 @@ class YouTubeChatBot:
                                             attempts=3, delay=3, source="Vote/restart-owner"
                                         )
                                         if ok:
-                                            restart_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
+                                            restart_cooldown_until = time.time() + PERMISSIONS_CONFIG.get("action_cooldown", 60)
                                             update_status("Running"); play_success_sound()
                                             play_event_sound("restart_sound")
                                             _append_event("RESTART", user, "owner bypass")
@@ -2490,7 +2492,7 @@ class YouTubeChatBot:
                                             attempts=3, delay=3, source="Vote/restart-chat"
                                         )
                                         if ok:
-                                            restart_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
+                                            restart_cooldown_until = time.time() + PERMISSIONS_CONFIG.get("action_cooldown", 60)
                                             update_status("Running"); play_success_sound()
                                             play_event_sound("restart_sound")
                                             _append_event("RESTART", "vote", f"chat vote passed ({current} votes)")
@@ -2510,6 +2512,7 @@ class YouTubeChatBot:
                                 if current_time < revert_cooldown_until:
                                     remaining_cd = int(revert_cooldown_until - current_time)
                                     print(f"[Vote] Revert on cooldown ({remaining_cd}s left)")
+                                    _append_event("COOLDOWN", user, f"revert blocked — {remaining_cd}s left")
                                     continue
                                 # Owner bypass: skip vote, execute immediately
                                 if is_owner:
@@ -2535,7 +2538,7 @@ class YouTubeChatBot:
                                             attempts=3, delay=4, source="Vote/revert-owner/startvm"
                                         )
                                         if ok2 and ok3:
-                                            revert_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
+                                            revert_cooldown_until = time.time() + PERMISSIONS_CONFIG.get("action_cooldown", 60)
                                             update_status("Running"); play_success_sound()
                                             play_event_sound("revert_sound")
                                             _append_event("REVERT", user, "owner bypass")
@@ -2578,7 +2581,7 @@ class YouTubeChatBot:
                                             attempts=3, delay=4, source="Vote/revert-chat/startvm"
                                         )
                                         if ok2 and ok3:
-                                            revert_cooldown_until = time.time() + VOTE_ACTION_COOLDOWN
+                                            revert_cooldown_until = time.time() + PERMISSIONS_CONFIG.get("action_cooldown", 60)
                                             update_status("Running"); play_success_sound()
                                             play_event_sound("revert_sound")
                                             _append_event("REVERT", "vote", f"chat vote passed ({current} votes)")
@@ -5197,7 +5200,8 @@ class UltraBotGUI:
         type_cb = ttk.Combobox(filter_frame, textvariable=self._elog_type_var,
                                state="readonly", width=14,
                                values=["ALL", "COMMAND", "RESTART", "REVERT",
-                                       "OS_SWITCH", "BAN_VOTE", "BAN", "SCHEDULER"])
+                                       "OS_SWITCH", "BAN_VOTE", "BAN",
+                                       "SCHEDULER", "COOLDOWN", "REALPC_CMD"])
         type_cb.pack(side="left", padx=(0, 12))
 
         tk.Label(filter_frame, text="User:", bg=self.BG2, fg=self.TEXTDIM,
@@ -5227,12 +5231,23 @@ class UltraBotGUI:
         self._elog_tree.column("type",   width=110, minwidth=80)
         self._elog_tree.column("user",   width=140, minwidth=80)
         self._elog_tree.column("detail", width=300, minwidth=100)
+        elog_scroll = ttk.Scrollbar(tree_frame, orient="vertical",
+                      command=self._elog_tree.yview)
+        elog_scroll.pack(side="right", fill="y")
         self._elog_tree.pack(fill="both", expand=True, side="left")
-        ttk.Scrollbar(tree_frame, orient="vertical",
-                      command=self._elog_tree.yview).pack(side="right", fill="y")
-        self._elog_tree.configure(yscrollcommand=lambda *a: None)
+        self._elog_tree.configure(yscrollcommand=elog_scroll.set)
 
         self._apply_elog_filter()
+        # Auto-refresh every 3 seconds while the tab is visible
+        self._elog_auto_refresh()
+
+    def _elog_auto_refresh(self):
+        """Called every 3s to keep the Event Log tab live."""
+        try:
+            self._apply_elog_filter()
+        except Exception:
+            pass
+        self.root.after(3000, self._elog_auto_refresh)
 
     def _apply_elog_filter(self):
         type_f = self._elog_type_var.get()
@@ -5295,12 +5310,14 @@ class UltraBotGUI:
         card.pack(fill="x", padx=12, pady=(8, 0))
 
         PERM_ROWS = [
-            ("restart_votes", "🔁  Restart votes required",
+            ("restart_votes",   "🔁  Restart votes required",
              "Number of !restart votes needed to reset the VM."),
-            ("revert_votes",  "⏮  Revert votes required",
+            ("revert_votes",    "⏮  Revert votes required",
              "Number of !revert votes needed to restore the snapshot."),
-            ("ban_votes",     "🚫  Ban votes required",
+            ("ban_votes",       "🚫  Ban votes required",
              "Number of !ban votes needed to ban a user."),
+            ("action_cooldown", "⏱  Action cooldown (seconds)",
+             "Seconds to wait after a restart/revert before another can be triggered."),
         ]
 
         self._perm_vars = {}
@@ -5312,11 +5329,13 @@ class UltraBotGUI:
                      font=("Segoe UI", 8)).grid(
                      row=row_i * 2 + 1, column=0, sticky="w", padx=(16, 0))
 
-            var = tk.IntVar(value=PERMISSIONS_CONFIG.get(key, 2))
+            var = tk.IntVar(value=PERMISSIONS_CONFIG.get(key, 2 if key != "action_cooldown" else 60))
             self._perm_vars[key] = var
 
+            spin_to = 3600 if key == "action_cooldown" else 99
+            spin_from = 0  if key == "action_cooldown" else 1
             spin = tk.Spinbox(card, textvariable=var,
-                              from_=1, to=99, width=6,
+                              from_=spin_from, to=spin_to, width=6,
                               bg=self.BG3, fg=self.TEXT,
                               insertbackground=self.TEXT,
                               buttonbackground=self.BG3,
@@ -5344,7 +5363,8 @@ class UltraBotGUI:
     def _save_permissions(self):
         for key, var in self._perm_vars.items():
             try:
-                PERMISSIONS_CONFIG[key] = max(1, int(var.get()))
+                val = int(var.get())
+                PERMISSIONS_CONFIG[key] = max(0, val) if key == "action_cooldown" else max(1, val)
             except ValueError:
                 pass
         save_permissions_config()
@@ -5352,7 +5372,8 @@ class UltraBotGUI:
         self._perm_status.configure(
             text=f"Saved — restart:{PERMISSIONS_CONFIG['restart_votes']}  "
                  f"revert:{PERMISSIONS_CONFIG['revert_votes']}  "
-                 f"ban:{PERMISSIONS_CONFIG['ban_votes']}")
+                 f"ban:{PERMISSIONS_CONFIG['ban_votes']}  "
+                 f"cooldown:{PERMISSIONS_CONFIG['action_cooldown']}s")
         self._log("[Permissions] Config saved.")
 
     # ──────────────── TAB 11 : SOUND & TTS ────────────────
