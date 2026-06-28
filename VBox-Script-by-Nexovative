@@ -44,7 +44,7 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & AUTO-UPDATE =========================
-VERSION = "29.3.0"   # increment this with every release
+VERSION = "29.5.0"   # increment this with every release
 
 # Replace these two URLs with your own GitHub repo paths.
 # GITHUB_VERSION_URL  → raw URL of version.json in your repo
@@ -646,6 +646,7 @@ REALPC_CONFIG = {
         "screenshot": True,
         "combo":      True,
     },
+    "text_only":         False,    # if True, only !type and !send work — everything else blocked
     "mouse_step":        50,       # pixels per !moverel step
     "scroll_step":       3,        # clicks per !scroll
     "max_type_length":   100,      # max chars per !type command
@@ -707,6 +708,12 @@ def _realpc_execute(username: str, action: str, args: str):
     args   : everything after the command word
     """
     if not _PYAUTOGUI_OK:
+        return
+
+    # Text-Only mode: only !type, !send (and aliases) are permitted
+    TEXT_ONLY_ACTIONS = {"type", "write", "text", "say", "send", "sendline", "typeenter"}
+    if REALPC_CONFIG.get("text_only", False) and action not in TEXT_ONLY_ACTIONS:
+        print(f"[RealPC] Text-only mode — blocked: !{action} from {username}")
         return
 
     allowed = REALPC_CONFIG.get("allowed_actions", {})
@@ -899,8 +906,8 @@ def _realpc_bot_loop():
         return
 
     wl_only   = REALPC_CONFIG.get("whitelist_only", False)
-    whitelist = {u.lower() for u in REALPC_CONFIG.get("whitelist", [])}
-    blocked   = {u.lower() for u in REALPC_CONFIG.get("blocked",   [])}
+    whitelist = {normalize_username(u) for u in REALPC_CONFIG.get("whitelist", [])}
+    blocked   = {normalize_username(u) for u in REALPC_CONFIG.get("blocked",   [])}
 
     pyautogui.FAILSAFE = REALPC_CONFIG.get("failsafe", True)
     pyautogui.PAUSE    = REALPC_CONFIG.get("action_delay", 0.05)
@@ -924,7 +931,7 @@ def _realpc_bot_loop():
                 if _realpc_stop_event.is_set():
                     break
 
-                user = msg_obj.author.name.strip().lower()
+                user = normalize_username(msg_obj.author.name)
                 msg  = msg_obj.message.strip()
 
                 if not msg or not msg.startswith("!"):
@@ -1454,7 +1461,21 @@ def _reset_session_stats():
 # ========================= USER MANAGEMENT LISTS =========================
 USER_MGMT_FILE = "user_mgmt.json"
 whitelist_users = set()   # empty = disabled; non-empty = only these users can use commands
-vip_users       = {}      # {username: {"votes_needed": int}}  (e.g. 1 = can solo-vote)
+vip_users       = {}      # {username: {"votes_needed": int}}
+
+def normalize_username(name: str) -> str:
+    """
+    Normalize a YouTube display name or user-typed name to a consistent
+    lowercase key used for all comparisons.
+    Strips leading/trailing whitespace, removes the @ prefix if present,
+    strips Unicode invisible characters, and lowercases.
+    """
+    import unicodedata
+    # Strip invisible / zero-width unicode chars
+    name = "".join(ch for ch in name if unicodedata.category(ch) not in
+                   ("Cf", "Cc", "Cs"))   # format, control, surrogate
+    name = name.strip().lstrip("@").strip().lower()
+    return name
 
 def load_user_mgmt():
     global whitelist_users, vip_users
@@ -1462,8 +1483,8 @@ def load_user_mgmt():
         if os.path.exists(USER_MGMT_FILE):
             with open(USER_MGMT_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            whitelist_users = set(u.lower() for u in data.get("whitelist", []))
-            vip_users       = {k.lower(): v for k, v in data.get("vip", {}).items()}
+            whitelist_users = set(normalize_username(u) for u in data.get("whitelist", []))
+            vip_users       = {normalize_username(k): v for k, v in data.get("vip", {}).items()}
             print(f"[UserMgmt] Loaded. whitelist={len(whitelist_users)}, vip={len(vip_users)}")
     except Exception as e:
         print(f"[UserMgmt] Load error: {e}")
@@ -2289,7 +2310,7 @@ class YouTubeChatBot:
                     if bot_stop_event.is_set():
                         break
                     msg      = c.message.strip()
-                    user     = c.author.name.strip().lower()
+                    user     = normalize_username(c.author.name)
                     is_owner = getattr(c.author, 'isChatOwner', False)
                     update_overlay(author=user, message=msg, msg_id=c.id)
                     if user in banned_users:
@@ -2660,7 +2681,7 @@ class YouTubeChatBotSecondary:
                     if bot_stop_event.is_set():
                         break
                     msg  = c.message.strip()
-                    user = c.author.name.strip().lower()
+                    user = normalize_username(c.author.name)
                     if user in banned_users and time.time() < banned_users[user]:
                         continue
                     if whitelist_users and user not in whitelist_users:
@@ -4912,7 +4933,7 @@ class UltraBotGUI:
         self._ban_refresh_job = self.root.after(5000, self._refresh_ban_list)
 
     def _gui_ban_user(self):
-        username = self._ban_user_var.get().strip().lstrip('@').lower()
+        username = normalize_username(self._ban_user_var.get())
         if not username:
             messagebox.showwarning("Missing", "Enter a username to ban.")
             return
@@ -4929,8 +4950,7 @@ class UltraBotGUI:
     def _gui_unban_user(self):
         sel = self._ban_tree.selection()
         if not sel:
-            # also try the typed field
-            username = self._ban_user_var.get().strip().lstrip('@').lower()
+            username = normalize_username(self._ban_user_var.get())
             if username and username in banned_users:
                 del banned_users[username]
                 self._log(f"[UserMgmt] Unbanned '{username}'.")
@@ -4958,7 +4978,7 @@ class UltraBotGUI:
             self._wl_listbox.insert("end", u)
 
     def _wl_add(self):
-        username = self._wl_user_var.get().strip().lstrip('@').lower()
+        username = normalize_username(self._wl_user_var.get())
         if not username:
             return
         whitelist_users.add(username)
@@ -4991,7 +5011,7 @@ class UltraBotGUI:
         self._vip_tree.tag_configure("odd",  background=self.BG2)
 
     def _vip_add(self):
-        username = self._vip_user_var.get().strip().lstrip('@').lower()
+        username = normalize_username(self._vip_user_var.get())
         if not username:
             return
         try:
@@ -6011,7 +6031,29 @@ class UltraBotGUI:
 
         tk.Label(allow_card, text="Allowed Action Categories",
                  bg=self.BG2, fg=self.ACCENT,
-                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 8))
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 4))
+
+        # Text-Only mode toggle
+        self._rpc_text_only_var = tk.BooleanVar(
+            value=REALPC_CONFIG.get("text_only", False))
+
+        text_only_row = tk.Frame(allow_card, bg=self.BG2)
+        text_only_row.pack(fill="x", pady=(0, 8))
+        text_only_row.bind("<MouseWheel>", _on_wheel)
+
+        text_only_cb = tk.Checkbutton(
+            text_only_row,
+            text="✏  Text Only Mode  —  only  !type  and  !send  are allowed, everything else is blocked",
+            variable=self._rpc_text_only_var,
+            bg=self.BG2, fg=self.YELLOW,
+            selectcolor=self.BG3, activebackground=self.BG2,
+            activeforeground=self.YELLOW,
+            font=("Segoe UI", 9, "bold"),
+            command=self._rpc_on_text_only_toggle,
+        )
+        text_only_cb.pack(side="left")
+
+        ttk.Separator(allow_card, orient="horizontal").pack(fill="x", pady=(0, 8))
 
         self._rpc_allow_vars = {}
         action_rows = [
@@ -6020,15 +6062,22 @@ class UltraBotGUI:
             ("mouse",      "🖱  Mouse     (!click, !rclick, !dclick, !move, !moverel, !scroll, !drag)"),
             ("screenshot", "📸  Screenshot  (!screenshot / !ss — saves PNG to bot folder)"),
         ]
+        self._rpc_allow_checkbuttons = []
         for key, label in action_rows:
             var = tk.BooleanVar(
                 value=REALPC_CONFIG.get("allowed_actions", {}).get(key, True))
             self._rpc_allow_vars[key] = var
-            tk.Checkbutton(allow_card, text=label,
+            cb = tk.Checkbutton(allow_card, text=label,
                            variable=var,
                            bg=self.BG2, fg=self.TEXT,
                            selectcolor=self.BG3, activebackground=self.BG2,
-                           font=("Segoe UI", 9)).pack(anchor="w", pady=2)
+                           font=("Segoe UI", 9))
+            cb.pack(anchor="w", pady=2)
+            cb.bind("<MouseWheel>", _on_wheel)
+            self._rpc_allow_checkbuttons.append(cb)
+
+        # Sync checkbox states on build
+        self._rpc_sync_text_only_ui()
 
         # ── Access Control card ──
         access_card = ttk.Frame(inner, style="Card.TFrame", padding=14)
@@ -6225,6 +6274,18 @@ class UltraBotGUI:
 
         self.root.after(500, _poll)
 
+    def _rpc_on_text_only_toggle(self):
+        """Called when the Text Only checkbox is clicked."""
+        self._rpc_sync_text_only_ui()
+
+    def _rpc_sync_text_only_ui(self):
+        """Grey out / restore category checkboxes based on Text Only state."""
+        text_only = self._rpc_text_only_var.get()
+        state = "disabled" if text_only else "normal"
+        fg    = self.TEXTDIM if text_only else self.TEXT
+        for cb in getattr(self, "_rpc_allow_checkbuttons", []):
+            cb.configure(state=state, fg=fg)
+
     def _rpc_start(self):
         # ── 3-step safety confirmation ──
         # Warning 1
@@ -6304,6 +6365,7 @@ class UltraBotGUI:
         REALPC_CONFIG["video_id"]       = self._rpc_vid_var.get().strip()
         REALPC_CONFIG["failsafe"]       = self._rpc_failsafe_var.get()
         REALPC_CONFIG["whitelist_only"] = self._rpc_wl_only_var.get()
+        REALPC_CONFIG["text_only"]      = self._rpc_text_only_var.get()
         try:
             REALPC_CONFIG["cooldown"] = max(0.0, float(self._rpc_cd_var.get()))
         except (ValueError, tk.TclError):
@@ -6327,7 +6389,7 @@ class UltraBotGUI:
         REALPC_CONFIG["blocked"]   = list(self._rpc_bl_listbox.get(0, "end"))
 
     def _rpc_wl_add(self):
-        user = self._rpc_wl_entry.get().strip().lstrip("@").lower()
+        user = normalize_username(self._rpc_wl_entry.get())
         if user and user not in self._rpc_wl_listbox.get(0, "end"):
             self._rpc_wl_listbox.insert("end", user)
         self._rpc_wl_entry.set("")
@@ -6338,7 +6400,7 @@ class UltraBotGUI:
             self._rpc_wl_listbox.delete(sel[0])
 
     def _rpc_bl_add(self):
-        user = self._rpc_bl_entry.get().strip().lstrip("@").lower()
+        user = normalize_username(self._rpc_bl_entry.get())
         if user and user not in self._rpc_bl_listbox.get(0, "end"):
             self._rpc_bl_listbox.insert("end", user)
         self._rpc_bl_entry.set("")
@@ -6690,6 +6752,70 @@ class UltraBotGUI:
                 ("h2",   "This guide"),
                 ("code", "  ❓ Help button  (title bar)  →  reopen this guide at any time"),
                 ("tip",  "Tip: tick  'Don't show on startup'  below to skip this guide next time."),
+            ]),
+            ("🖱  Real PC Control", [
+                ("h1",   "🖱  Real PC Control"),
+                ("body", "Let YouTube chat control THIS physical computer — keyboard, mouse, hotkeys and more — using pyautogui.  The VM bot and the Real PC bot are completely independent and can run simultaneously on different streams."),
+                ("h2",   "Requirements"),
+                ("body", "pyautogui must be installed.  If the tab shows a warning, open a terminal and run:"),
+                ("code", "  pip install pyautogui"),
+                ("body", "Then restart the bot.  The tab will become fully functional."),
+                ("h2",   "Setup"),
+                ("body", "1.  Go to the  🖱 Real PC  tab."),
+                ("body", "2.  Enter the YouTube Video ID to listen on  (can be the same as the main bot or a different stream)."),
+                ("body", "3.  Click  ▶ Start Real PC Bot."),
+                ("body", "4.  Confirm all three safety warnings — read them carefully."),
+                ("h2",   "Safety warnings"),
+                ("body", "Starting the Real PC bot shows three mandatory confirmation dialogs explaining the risks.  You must click OK on all three before the bot starts.  This is intentional — giving chat access to your real computer is serious."),
+                ("tip",  "Tip: enable Failsafe.  Move your mouse to the top-left corner of the screen to instantly abort all actions."),
+                ("tip",  "Tip: use the Whitelist to restrict which viewers can send commands."),
+                ("tip",  "Tip: disable action categories you don't need  (e.g. Screenshot, Combo)  in the Allowed Actions section."),
+                ("h2",   "Commands  (no prefix — same  !command  style as main bot)"),
+                ("code", "  !type hello world    →  types text into the focused window"),
+                ("code", "  !send hello          →  types text then presses Enter"),
+                ("code", "  !key f5              →  presses a single key"),
+                ("code", "  !enter               →  presses Enter"),
+                ("code", "  !space               →  presses Space"),
+                ("code", "  !backspace           →  deletes last character"),
+                ("code", "  !combo win+r         →  presses Win + R together"),
+                ("code", "  !combo ctrl+c        →  copy"),
+                ("code", "  !combo alt+f4        →  close focused window"),
+                ("code", "  !click               →  left-click at current cursor position"),
+                ("code", "  !click 960 540       →  left-click at x=960  y=540"),
+                ("code", "  !rclick              →  right-click"),
+                ("code", "  !dclick              →  double-click"),
+                ("code", "  !move 960 540        →  move cursor to exact coordinates"),
+                ("code", "  !moverel up          →  move cursor up by step pixels"),
+                ("code", "  !moverel down / left / right"),
+                ("code", "  !moverel 100 -50     →  move cursor by +100x  -50y"),
+                ("code", "  !scroll 3            →  scroll up 3 clicks"),
+                ("code", "  !scroll -3           →  scroll down 3 clicks"),
+                ("code", "  !drag 200 0          →  drag mouse 200px right"),
+                ("code", "  !screenshot          →  save a PNG to the bot folder"),
+                ("code", "  !pos                 →  show current cursor position in status bar"),
+                ("code", "  !size                →  show screen resolution in status bar"),
+                ("h2",   "Chain commands"),
+                ("body", "Multiple commands can be combined in a single chat message — they execute left-to-right in order:"),
+                ("code", "  !combo win+r !wait 1 !send cmd !wait 0.5 !key enter"),
+                ("code", "  !click 960 540 !wait 0.3 !type hello !enter"),
+                ("h2",   "Wait / Delay"),
+                ("code", "  !wait 1              →  wait 1 second before next command  (max 10s)"),
+                ("code", "  !wait 0.5            →  wait 500ms"),
+                ("code", "  !sleep 2             →  same as !wait"),
+                ("h2",   "Settings"),
+                ("body", "All settings are in the 🖱 Real PC tab and saved to  realpc_config.json:"),
+                ("code", "  Per-user cooldown    →  minimum seconds between commands from the same user"),
+                ("code", "  Mouse step           →  pixels moved per  !moverel up/down/left/right"),
+                ("code", "  Scroll step          →  clicks per  !scroll  without an explicit number"),
+                ("code", "  Max type length      →  character limit for  !type  and  !send"),
+                ("code", "  Failsafe             →  move mouse to top-left corner to abort"),
+                ("h2",   "Access control"),
+                ("body", "Whitelist — only listed usernames can send commands.  Leave disabled to allow everyone."),
+                ("body", "Blocked — listed users are always ignored, regardless of whitelist setting."),
+                ("body", "Both lists accept usernames with or without  @."),
+                ("h2",   "Live Action Log"),
+                ("body", "The bottom of the tab shows a live log of every Real PC command executed, updated every 500ms.  All events are also recorded in the 📋 Event Log tab under the  REALPC_CMD  type."),
+                ("tip",  "WARNING: This feature gives chat control over your real computer.  The developer is not responsible for any damage, data loss, or privacy breach caused by its use.  Always supervise the stream while this feature is active."),
             ]),
         ]
 
