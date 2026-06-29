@@ -75,12 +75,12 @@ async def execute_custom_command_async(trigger: str):
             elif action in ("click", "lclick"):
                 client = await controller.connect_fresh()
                 if client:
-                    loop = asyncio.get_event_loop()
+                    loop = asyncio.get_running_loop()
                     await loop.run_in_executor(None, lambda: client.mousePress(1))
             elif action in ("rclick", "rightclick"):
                 client = await controller.connect_fresh()
                 if client:
-                    loop = asyncio.get_event_loop()
+                    loop = asyncio.get_running_loop()
                     await loop.run_in_executor(None, lambda: client.mousePress(3))
             elif action in ("move", "mv"):
                 parts = args_str.split()
@@ -90,7 +90,7 @@ async def execute_custom_command_async(trigger: str):
                         dx = int(parts[0]); dy = int(parts[1])
                         controller.cursor_x = max(0, min(1920, controller.cursor_x + dx))
                         controller.cursor_y = max(0, min(1080, controller.cursor_y + dy))
-                        loop = asyncio.get_event_loop()
+                        loop = asyncio.get_running_loop()
                         await loop.run_in_executor(None,
                             lambda: client.mouseMove(controller.cursor_x, controller.cursor_y))
             elif action in ("abs", "moveabs"):
@@ -100,7 +100,7 @@ async def execute_custom_command_async(trigger: str):
                     if client:
                         controller.cursor_x = max(0, min(1920, int(parts[0])))
                         controller.cursor_y = max(0, min(1080, int(parts[1])))
-                        loop = asyncio.get_event_loop()
+                        loop = asyncio.get_running_loop()
                         await loop.run_in_executor(None,
                             lambda: client.mouseMove(controller.cursor_x, controller.cursor_y))
             elif action in ("scroll", "wheel"):
@@ -109,7 +109,7 @@ async def execute_custom_command_async(trigger: str):
                     button = 4 if delta > 0 else 5
                     client = await controller.connect_fresh()
                     if client:
-                        loop = asyncio.get_event_loop()
+                        loop = asyncio.get_running_loop()
                         for _ in range(abs(delta)):
                             await loop.run_in_executor(None, lambda b=button: client.mousePress(b))
                             await asyncio.sleep(0.01)
@@ -182,38 +182,41 @@ SCANCODE_MAP = {
 overlay_data    = {"chat": [], "running_command": ""}
 seen_message_ids = set()
 last_write_time = 0
+_overlay_lock   = threading.Lock()
 
 
 def update_overlay(author=None, message=None, running=None, msg_id=None):
     global last_write_time
-    changed      = False
     current_time = time.time()
 
-    if running is not None and overlay_data.get("running_command") != running:
-        overlay_data["running_command"] = running
-        changed = True
+    with _overlay_lock:
+        changed = False
 
-    if author and message and msg_id and msg_id not in seen_message_ids:
-        seen_message_ids.add(msg_id)
-        overlay_data["chat"].append({
-            "author":  str(author),
-            "message": str(message),
-            "id":      str(msg_id),
-        })
+        if running is not None and overlay_data.get("running_command") != running:
+            overlay_data["running_command"] = running
+            changed = True
 
-        if len(overlay_data["chat"]) > 20:
-            removed = overlay_data["chat"].pop(0)
-            seen_message_ids.discard(removed.get("id"))
+        if author and message and msg_id and msg_id not in seen_message_ids:
+            seen_message_ids.add(msg_id)
+            overlay_data["chat"].append({
+                "author":  str(author),
+                "message": str(message),
+                "id":      str(msg_id),
+            })
 
-        changed = True
+            if len(overlay_data["chat"]) > 20:
+                removed = overlay_data["chat"].pop(0)
+                seen_message_ids.discard(removed.get("id"))
 
-    if changed and (current_time - last_write_time > 0.15):
-        try:
-            with open("overlay.json", "w", encoding="utf-8") as f:
-                json.dump(overlay_data, f, ensure_ascii=False, separators=(",", ":"))
-            last_write_time = current_time
-        except Exception as e:
-            print(f"[Overlay Error] {e}")
+            changed = True
+
+        if changed and (current_time - last_write_time > 0.15):
+            try:
+                with open("overlay.json", "w", encoding="utf-8") as f:
+                    json.dump(overlay_data, f, ensure_ascii=False, separators=(",", ":"))
+                last_write_time = current_time
+            except Exception as e:
+                print(f"[Overlay Error] {e}")
 
 
 async def show_running_command(cmd_text: str):
@@ -258,7 +261,7 @@ class VMController:
         await self._disconnect()
         try:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] New VNC connection...")
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             self.client = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
@@ -286,7 +289,7 @@ class VMController:
 
     async def _clear_stuck_modifiers(self, client):
         """Send keyUp for every modifier key to clear any stuck VNC keyboard state."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         modifier_names = [
             "shift", "ctrl", "alt", "win", "capslock",
         ]
@@ -319,7 +322,7 @@ class VMController:
             if not client:
                 return False
             try:
-                loop      = asyncio.get_event_loop()
+                loop      = asyncio.get_running_loop()
                 clean_key = key.strip().lower()
                 mapped_key = SCANCODE_MAP.get(clean_key, clean_key)
 
@@ -377,7 +380,7 @@ class VMController:
             if not client:
                 return False
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 for char in text:
                     if char.isupper() or char in '!@#$%^&*()_+{}|:"<>?~':
                         # Hold Shift for uppercase / special characters.
@@ -500,15 +503,20 @@ class ConsoleRedirect:
         self.widget        = widget
         self._orig_stdout  = sys.stdout
         self._orig_stderr  = sys.stderr
+        self._pending      = ""   # Buffer to accumulate incomplete lines.
 
     def write(self, msg):
         self._orig_stdout.write(msg)
         try:
-            self.widget.configure(state='normal')
-            ts = time.strftime("%H:%M:%S")
-            self.widget.insert('end', f"[{ts}] {msg}")
-            self.widget.see('end')
-            self.widget.configure(state='disabled')
+            self._pending += msg
+            # Only flush complete lines so each timestamp appears once per line.
+            while "\n" in self._pending:
+                line, self._pending = self._pending.split("\n", 1)
+                ts = time.strftime("%H:%M:%S")
+                self.widget.configure(state='normal')
+                self.widget.insert('end', f"[{ts}] {line}\n")
+                self.widget.see('end')
+                self.widget.configure(state='disabled')
         except Exception:
             pass
 
@@ -915,17 +923,17 @@ class UltraBotGUI:
     def _vm_start(self):
         if not self._check_vmx(): return
         self._log("[VM] Start requested.")
-        self._run_vm_action(
-            run_vmrun(["-T","ws","start",VMX_PATH,"gui"]),
-            "Starting...", "Started", "Start error")
+        async def _start():
+            await run_vmrun(["-T","ws","start",VMX_PATH,"gui"])
+        self._run_vm_action(_start(), "Starting...", "Started", "Start error")
 
     def _vm_restart(self):
         if not self._check_vmx(): return
         if not messagebox.askyesno("Restart VM", f"Hard reset the VM now?"): return
         self._log("[VM] Restart requested.")
-        self._run_vm_action(
-            run_vmrun(["-T","ws","reset",VMX_PATH,"hard"]),
-            "Restarting...", "Restarted", "Restart error")
+        async def _restart():
+            await run_vmrun(["-T","ws","reset",VMX_PATH,"hard"])
+        self._run_vm_action(_restart(), "Restarting...", "Restarted", "Restart error")
 
     def _vm_revert(self):
         if not self._check_vmx(): return
@@ -943,9 +951,9 @@ class UltraBotGUI:
         if not messagebox.askyesno("Shutdown VM",
                 "Force stop the VM?\nUnsaved VM state will be lost."): return
         self._log("[VM] Shutdown requested.")
-        self._run_vm_action(
-            run_vmrun(["-T","ws","stop",VMX_PATH,"hard"]),
-            "Shutting down...", "Powered off", "Shutdown error")
+        async def _shutdown():
+            await run_vmrun(["-T","ws","stop",VMX_PATH,"hard"])
+        self._run_vm_action(_shutdown(), "Shutting down...", "Powered off", "Shutdown error")
 
     # ──────────────── VM List ────────────────
     def _refresh_vm_list(self):
@@ -1016,6 +1024,12 @@ class UltraBotGUI:
 
     def _stop_bot(self):
         self._bot_running = False
+        loop = _bot_loop
+        if loop and loop.is_running():
+            # Cancel all running tasks in the bot event loop so youtube_loop exits.
+            loop.call_soon_threadsafe(
+                lambda: [t.cancel() for t in asyncio.all_tasks(loop)]
+            )
         if self._console_redir:
             self._console_redir.stop()
             self._console_redir = None
@@ -1051,9 +1065,12 @@ class UltraBotGUI:
             else:
                 print(f"[Admin] Unknown command: {cmd}")
 
-        threading.Thread(
-            target=lambda: asyncio.run(_run()), daemon=True
-        ).start()
+        if _bot_loop and _bot_loop.is_running():
+            asyncio.run_coroutine_threadsafe(_run(), _bot_loop)
+        else:
+            threading.Thread(
+                target=lambda: asyncio.run(_run()), daemon=True
+            ).start()
 
     # ──────────────── Helpers ────────────────
     def _log(self, msg):
@@ -1199,7 +1216,7 @@ async def run_vmrun(args: list) -> bool:
             print(f"vmrun not found at: {VMRUN_PATH}")
             return False
         # run_in_executor prevents subprocess.run from blocking the async loop.
-        loop   = asyncio.get_event_loop()
+        loop   = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None,
             lambda: subprocess.run(
@@ -1301,7 +1318,7 @@ async def process_command(message: str, author: str):
             async with controller._lock:
                 client = await controller.connect_fresh()
                 if client:
-                    loop        = asyncio.get_event_loop()
+                    loop        = asyncio.get_running_loop()
                     key_released = False
                     try:
                         await asyncio.wait_for(
@@ -1356,7 +1373,7 @@ async def process_command(message: str, author: str):
                 client = await controller.connect_fresh()
                 if client:
                     key  = SCANCODE_MAP.get(args[0].lower(), args[0].lower())
-                    loop = asyncio.get_event_loop()
+                    loop = asyncio.get_running_loop()
                     try:
                         await asyncio.wait_for(
                             loop.run_in_executor(None, lambda: client.keyUp(key)),
@@ -1376,7 +1393,7 @@ async def process_command(message: str, author: str):
             async with controller._lock:
                 client = await controller.connect_fresh()
                 if client:
-                    loop = asyncio.get_event_loop()
+                    loop = asyncio.get_running_loop()
                     # FIX: expanded list — any holdable key can get stuck, not just
                     # classic modifiers.
                     release_keys = [
@@ -1424,7 +1441,7 @@ async def process_command(message: str, author: str):
                         elif direction == "right": controller.cursor_x += step
                         controller.cursor_x = max(0, min(1920, controller.cursor_x))
                         controller.cursor_y = max(0, min(1080, controller.cursor_y))
-                        loop = asyncio.get_event_loop()
+                        loop = asyncio.get_running_loop()
                         await loop.run_in_executor(
                             None,
                             lambda: client.mouseMove(controller.cursor_x, controller.cursor_y),
@@ -1433,7 +1450,7 @@ async def process_command(message: str, author: str):
                         dx, dy = int(args[0]), int(args[1])
                         controller.cursor_x = max(0, min(1920, controller.cursor_x + dx))
                         controller.cursor_y = max(0, min(1080, controller.cursor_y + dy))
-                        loop = asyncio.get_event_loop()
+                        loop = asyncio.get_running_loop()
                         await loop.run_in_executor(
                             None,
                             lambda: client.mouseMove(controller.cursor_x, controller.cursor_y),
@@ -1447,7 +1464,7 @@ async def process_command(message: str, author: str):
                 try:
                     controller.cursor_x = max(0, min(1920, int(args[0])))
                     controller.cursor_y = max(0, min(1080, int(args[1])))
-                    loop = asyncio.get_event_loop()
+                    loop = asyncio.get_running_loop()
                     await loop.run_in_executor(
                         None,
                         lambda: client.mouseMove(controller.cursor_x, controller.cursor_y),
@@ -1462,7 +1479,7 @@ async def process_command(message: str, author: str):
                     dx, dy = int(args[0]), int(args[1])
                     controller.cursor_x = max(0, min(1920, controller.cursor_x + dx))
                     controller.cursor_y = max(0, min(1080, controller.cursor_y + dy))
-                    loop = asyncio.get_event_loop()
+                    loop = asyncio.get_running_loop()
                     await loop.run_in_executor(
                         None,
                         lambda: client.mouseDrag(controller.cursor_x, controller.cursor_y),
@@ -1474,7 +1491,7 @@ async def process_command(message: str, author: str):
             client = await controller.connect_fresh()
             if client:
                 count = int(args[0]) if args and args[0].isdigit() else 1
-                loop  = asyncio.get_event_loop()
+                loop  = asyncio.get_running_loop()
                 for _ in range(count):
                     await loop.run_in_executor(None, lambda: client.mousePress(1))
                     await asyncio.sleep(0.01)
@@ -1483,7 +1500,7 @@ async def process_command(message: str, author: str):
             client = await controller.connect_fresh()
             if client:
                 count = int(args[0]) if args and args[0].isdigit() else 1
-                loop  = asyncio.get_event_loop()
+                loop  = asyncio.get_running_loop()
                 for _ in range(count):
                     # FIX: Was mousePress(2) which is MIDDLE click in VNC protocol.
                     # Right click is button 3.
@@ -1496,7 +1513,7 @@ async def process_command(message: str, author: str):
                 try:
                     delta  = int(args[0])
                     button = 4 if delta > 0 else 5  # 4 = scroll up, 5 = scroll down
-                    loop   = asyncio.get_event_loop()
+                    loop   = asyncio.get_running_loop()
                     # FIX: Was "abs(delta) // 120" which treated deltas like Windows
                     # WM_MOUSEWHEEL units; chat-sourced deltas are plain step counts
                     # (1, 2, 3 …) so dividing by 120 always produced 0, making scroll
@@ -1535,6 +1552,13 @@ async def youtube_loop():
                     if msg.startswith(PREFIX):
                         await process_command(msg, c.author.name)
 
+                # Purge voters who have been inactive for more than 10 minutes
+                # to prevent active_voters from growing indefinitely.
+                cutoff = time.time() - 600
+                stale = [k for k, v in active_voters.items() if v < cutoff]
+                for k in stale:
+                    del active_voters[k]
+
                 await asyncio.sleep(0.4)
 
         except Exception as e:
@@ -1548,8 +1572,9 @@ async def youtube_loop():
                     pass
 
         await asyncio.sleep(0.4)
-        
-        # ========================= MAIN =========================
+
+
+# ========================= MAIN =========================
 if __name__ == "__main__":
     load_custom_commands()
     root = tk.Tk()
