@@ -44,7 +44,7 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & AUTO-UPDATE =========================
-VERSION = "29.6.0"   # increment this with every release
+VERSION = "29.7.0"   # increment this with every release
 
 # Replace these two URLs with your own GitHub repo paths.
 # GITHUB_VERSION_URL  → raw URL of version.json in your repo
@@ -1697,6 +1697,39 @@ def save_auto_start_config():
         print(f"[AutoStart] Save error: {e}")
 
 VOTE_ACTION_COOLDOWN = 60          # seconds after a restart/revert before another can be voted
+
+# ========================= RECONNECT CONFIG =========================
+RECONNECT_CONFIG_FILE = "reconnect_config.json"
+RECONNECT_CONFIG = {
+    "max_failures":      10,    # stop bot after this many consecutive failures (0 = infinite)
+    "base_delay":         5,    # seconds to wait after first failure
+    "max_delay":        120,    # cap on exponential backoff delay
+    "notify_threshold":   3,    # desktop notification after this many consecutive failures
+}
+
+def load_reconnect_config():
+    global RECONNECT_CONFIG
+    try:
+        if os.path.exists(RECONNECT_CONFIG_FILE):
+            with open(RECONNECT_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            RECONNECT_CONFIG.update(data)
+            print("[Reconnect] Config loaded.")
+    except Exception as e:
+        print(f"[Reconnect] Load error: {e}")
+
+def save_reconnect_config():
+    try:
+        with open(RECONNECT_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(RECONNECT_CONFIG, f, indent=2)
+        print("[Reconnect] Config saved.")
+    except Exception as e:
+        print(f"[Reconnect] Save error: {e}")
+
+# Global reference to the GUI app instance — set when the app is created.
+# Used by background threads (bot loop, scheduler) to call GUI methods
+# like _append_chat safely via root.after().
+_gui_app = None
 restart_cooldown_until = 0.0       # epoch time when restart cooldown expires
 revert_cooldown_until  = 0.0       # epoch time when revert cooldown expires
 
@@ -2272,23 +2305,54 @@ class YouTubeChatBot:
        # threading.Thread(target=fetch_youtube_stats, daemon=True).start()
 
     def reconnect(self):
-        print("[Bot] Reconnecting to YouTube chat...")
         if self.chat:
             try: self.chat.terminate()
             except: pass
         try:
             self.chat = pytchat.create(video_id=self.video_id)
             if self._reconnect_failures > 0:
-                print(f"[Bot] Reconnect successful after {self._reconnect_failures} failure(s).")
+                msg = f"[Bot] Reconnect successful after {self._reconnect_failures} failure(s)."
+                print(msg)
+                _append_event("RECONNECT", "system", f"recovered after {self._reconnect_failures} failures")
+                update_status("Running")
             self._reconnect_failures = 0
             return True
         except Exception as e:
             self._reconnect_failures += 1
             log_error("Bot/Reconnect", e, f"consecutive failures: {self._reconnect_failures}")
-            if self._reconnect_failures == 5:
+
+            # Exponential backoff delay
+            base  = RECONNECT_CONFIG.get("base_delay", 5)
+            cap   = RECONNECT_CONFIG.get("max_delay", 120)
+            delay = min(base * (2 ** (self._reconnect_failures - 1)), cap)
+            print(f"[Bot] Reconnect failed ({self._reconnect_failures}x) — retrying in {delay:.0f}s...")
+            update_status(f"Reconnecting... (attempt {self._reconnect_failures})")
+            _append_event("RECONNECT_FAIL", "system",
+                          f"failure #{self._reconnect_failures} — retry in {delay:.0f}s")
+
+            # Notify on threshold
+            threshold = RECONNECT_CONFIG.get("notify_threshold", 3)
+            if self._reconnect_failures == threshold:
                 notify("Chat Connection Lost",
-                       "Failed to connect to YouTube chat 5 times in a row. Check the Video ID and your internet.",
+                       f"Failed to reconnect to YouTube chat {threshold} times.\n"
+                       f"Check your Video ID and internet connection.",
                        timeout=10)
+
+            # Stop bot if max failures reached
+            max_f = RECONNECT_CONFIG.get("max_failures", 10)
+            if max_f > 0 and self._reconnect_failures >= max_f:
+                print(f"[Bot] Max reconnect failures ({max_f}) reached. Stopping bot.")
+                notify("Bot Stopped",
+                       f"Chat connection failed {max_f} times in a row.\n"
+                       "The bot has been stopped automatically.",
+                       timeout=12)
+                _append_event("BOT_STOP", "system", f"auto-stopped after {max_f} reconnect failures")
+                update_status("Stopped — too many failures")
+                bot_stop_event.set()
+                return False
+
+            # Wait with interruptible sleep
+            bot_stop_event.wait(delay)
             return False
 
     def run(self):
@@ -2322,6 +2386,21 @@ class YouTubeChatBot:
                         continue
                     active_users.add(c.author.name.strip())
                     print(f"[Chat] [{user}]: {msg}")
+
+                    # Live Chat Viewer
+                    _is_cmd     = msg.startswith("!")
+                    _is_banned_ = (user in banned_users and
+                                   time.time() < banned_users.get(user, 0))
+                    if _gui_app is not None:
+                        try:
+                            _gui_app._append_chat(
+                                user, msg,
+                                is_owner=is_owner,
+                                is_command=_is_cmd,
+                                is_banned=_is_banned_,
+                            )
+                        except Exception:
+                            pass
 
                     if msg.startswith('!'):
                         chain_parts = [p.strip() for p in msg.split('!') if p.strip()]
@@ -2845,6 +2924,8 @@ class UltraBotGUI:
         self._unsaved_tabs = set()
         self._current_tab  = 0      # index of the currently visible tab
 
+        global _gui_app
+        _gui_app = self
         load_appearance_config()
         self._build_styles()
         load_os_voting_config()
@@ -3069,6 +3150,7 @@ class UltraBotGUI:
         tab12 = ttk.Frame(nb)
         tab13 = ttk.Frame(nb)
         tab14 = ttk.Frame(nb)
+        tab15 = ttk.Frame(nb)
         nb.add(tab1,  text="▶ Main")
         nb.add(tab2,  text="⚙ Cmds")
         nb.add(tab3,  text="🖥 VM")
@@ -3083,6 +3165,7 @@ class UltraBotGUI:
         nb.add(tab12, text="🌐 Streams")
         nb.add(tab13, text="📅 Sched")
         nb.add(tab14, text="🖱 Real PC")
+        nb.add(tab15, text="🔄 Reconnect")
 
         self._build_main_tab(tab1)
         self._build_cmd_builder_tab(tab2)
@@ -3098,6 +3181,7 @@ class UltraBotGUI:
         self._build_multi_stream_tab(tab12)
         self._build_scheduler_tab(tab13)
         self._build_realpc_tab(tab14)
+        self._build_reconnect_tab(tab15)
         self._sync_main_vm_lock()
         self._nb = nb   # store reference for unsaved-changes guard
         self._bind_context_menus()   # attach right-click menus to all Entry/Text widgets
@@ -3245,16 +3329,69 @@ class UltraBotGUI:
         ttk.Button(admin_frame, text="Send ↵", style="Accent.TButton",
                    command=self._send_admin_cmd).pack(side="left")
 
-        # Console label
-        tk.Label(parent, text="Console Output",
-                 bg=self.BG, fg=self.TEXTDIM,
-                 font=("Segoe UI",9,"bold")).pack(
-                 anchor="w", padx=16, pady=(4,0))
+        # ── Bottom pane: Live Chat Viewer | Console Output ──
+        bottom_pane = tk.PanedWindow(parent, orient="horizontal",
+                                     bg=self.BORDER, sashwidth=5,
+                                     sashrelief="flat", bd=0)
+        bottom_pane.pack(fill="both", expand=True, padx=12, pady=(2, 0))
 
-        # Console packed last: expand=True fills remaining space between
-        # the fixed widgets above and the admin bar anchored at the bottom.
-        console_frame = tk.Frame(parent, bg=self.BORDER, bd=1)
-        console_frame.pack(fill="both", expand=True, padx=12, pady=(2,0))
+        # Left: Live Chat Viewer
+        chat_outer = tk.Frame(bottom_pane, bg=self.BG)
+        bottom_pane.add(chat_outer, minsize=220, width=320)
+
+        chat_hdr = tk.Frame(chat_outer, bg=self.BG)
+        chat_hdr.pack(fill="x", pady=(0, 4))
+        tk.Label(chat_hdr, text="💬  Live Chat",
+                 bg=self.BG, fg=self.ACCENT,
+                 font=("Segoe UI", 9, "bold")).pack(side="left")
+        ttk.Button(chat_hdr, text="🗑", style="Dim.TButton", width=2,
+                   command=self._clear_chat_viewer).pack(side="right")
+
+        chat_frame = tk.Frame(chat_outer, bg=self.BORDER, bd=1)
+        chat_frame.pack(fill="both", expand=True)
+        self._chat_viewer = tk.Text(
+            chat_frame,
+            bg=self.BG3, fg=self.TEXT,
+            font=("Segoe UI", 9),
+            insertbackground=self.TEXT,
+            selectbackground=self.ACCENT,
+            relief="flat", bd=0,
+            state="disabled", wrap="word",
+        )
+        chat_scroll = ttk.Scrollbar(chat_frame, orient="vertical",
+                                    command=self._chat_viewer.yview)
+        chat_scroll.pack(side="right", fill="y")
+        self._chat_viewer.pack(fill="both", expand=True, padx=1, pady=1)
+        self._chat_viewer.configure(yscrollcommand=chat_scroll.set)
+
+        # Color tags for chat viewer
+        self._chat_viewer.tag_configure("owner",   foreground=self.YELLOW,  font=("Segoe UI", 9, "bold"))
+        self._chat_viewer.tag_configure("command", foreground=self.GREEN,   font=("Segoe UI", 9, "bold"))
+        self._chat_viewer.tag_configure("vip",     foreground=self.ACCENT,  font=("Segoe UI", 9, "bold"))
+        self._chat_viewer.tag_configure("banned",  foreground=self.RED,     font=("Segoe UI", 9, "italic"))
+        self._chat_viewer.tag_configure("normal",  foreground=self.TEXT,    font=("Segoe UI", 9))
+        self._chat_viewer.tag_configure("user",    foreground=self.TEXTDIM, font=("Segoe UI", 9, "bold"))
+        self._chat_viewer.tag_configure("ts",      foreground=self.TEXTDIM, font=("Segoe UI", 8))
+        self._chat_viewer.tag_configure("system",  foreground=self.ACCENT2, font=("Segoe UI", 8, "italic"))
+
+        # Auto-scroll toggle
+        self._chat_autoscroll = tk.BooleanVar(value=True)
+        tk.Checkbutton(chat_outer, text="Auto-scroll",
+                       variable=self._chat_autoscroll,
+                       bg=self.BG, fg=self.TEXTDIM,
+                       selectcolor=self.BG3, activebackground=self.BG,
+                       font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
+
+        # Right: Console Output
+        console_outer = tk.Frame(bottom_pane, bg=self.BG)
+        bottom_pane.add(console_outer, minsize=200)
+
+        tk.Label(console_outer, text="Console Output",
+                 bg=self.BG, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 4))
+
+        console_frame = tk.Frame(console_outer, bg=self.BORDER, bd=1)
+        console_frame.pack(fill="both", expand=True)
         self._console = scrolledtext.ScrolledText(
             console_frame,
             bg=self.CONSOLE, fg=self.CONTEXT,
@@ -3270,7 +3407,57 @@ class UltraBotGUI:
         # Initial VM list load
         self._refresh_vm_list()
 
-    # ──────────────── TAB 2 : COMMAND BUILDER ────────────────
+    def _clear_chat_viewer(self):
+        try:
+            self._chat_viewer.configure(state="normal")
+            self._chat_viewer.delete("1.0", "end")
+            self._chat_viewer.configure(state="disabled")
+        except Exception:
+            pass
+
+    def _append_chat(self, user: str, msg: str, is_owner: bool = False,
+                     is_command: bool = False, is_banned: bool = False):
+        """Append a chat message to the Live Chat Viewer widget (thread-safe)."""
+        def _do():
+            try:
+                ts   = time.strftime("%H:%M:%S")
+                self._chat_viewer.configure(state="normal")
+                self._chat_viewer.insert("end", f"[{ts}] ", "ts")
+                if is_banned:
+                    self._chat_viewer.insert("end", f"{user}", "banned")
+                elif is_owner:
+                    self._chat_viewer.insert("end", f"★{user}", "owner")
+                elif user in vip_users:
+                    self._chat_viewer.insert("end", f"♦{user}", "vip")
+                else:
+                    self._chat_viewer.insert("end", f"{user}", "user")
+                self._chat_viewer.insert("end", ": ", "ts")
+                tag = "command" if is_command else "normal"
+                self._chat_viewer.insert("end", f"{msg}\n", tag)
+                # Keep last 500 lines
+                line_count = int(self._chat_viewer.index("end-1c").split(".")[0])
+                if line_count > 500:
+                    self._chat_viewer.delete("1.0", f"{line_count - 500}.0")
+                self._chat_viewer.configure(state="disabled")
+                if self._chat_autoscroll.get():
+                    self._chat_viewer.see("end")
+            except Exception:
+                pass
+        self.root.after(0, _do)
+
+    def _append_chat_system(self, msg: str):
+        """Append a system message (reconnect, bot start/stop) to the chat viewer."""
+        def _do():
+            try:
+                ts = time.strftime("%H:%M:%S")
+                self._chat_viewer.configure(state="normal")
+                self._chat_viewer.insert("end", f"[{ts}] ── {msg} ──\n", "system")
+                self._chat_viewer.configure(state="disabled")
+                if self._chat_autoscroll.get():
+                    self._chat_viewer.see("end")
+            except Exception:
+                pass
+        self.root.after(0, _do)
     def _build_cmd_builder_tab(self, parent):
         parent.configure(style="TFrame")
 
@@ -3752,7 +3939,7 @@ class UltraBotGUI:
             setattr(self.__class__, key, val)
             if hasattr(self, '_color_vars') and key in self._color_vars:
                 self._color_vars[key].set(val)
-        self._full_ui_rebuild()
+        self._apply_theme_live()
         self._log(f"[Appearance] Applied preset: {name}")
 
     def _pick_color(self, key):
@@ -3761,19 +3948,145 @@ class UltraBotGUI:
         result  = colorchooser.askcolor(color=current, title=f"Pick color for {key}")
         if result and result[1]:
             setattr(self.__class__, key, result[1])
-            self._full_ui_rebuild()
+            self._apply_theme_live()
 
     def _apply_color_entry(self, key):
         val = self._color_vars[key].get().strip()
         if not (val.startswith("#") and len(val) in (4, 7)):
             return
         setattr(self.__class__, key, val)
-        self._full_ui_rebuild()
+        self._apply_theme_live()
 
     def _apply_font_size(self):
         fs = self._font_size_var.get()
         self.__class__._FONT_SIZE = fs
-        self._full_ui_rebuild()
+        self._apply_theme_live()
+
+    def _apply_theme_live(self):
+        """
+        Apply the current color/font theme to ALL existing widgets WITHOUT
+        destroying or rebuilding anything.  The bot keeps running, the
+        console is untouched, and the YouTube connection stays open.
+
+        Strategy:
+          1. Rebuild ttk styles  — covers all ttk widgets automatically.
+          2. Walk every tk (non-ttk) widget and re-configure bg/fg/font
+             based on its role (inferred from current colors).
+          3. Update the root window background.
+        """
+        self._build_styles()
+        self.root.configure(bg=self.BG)
+
+        # Color mapping: current-color → new-color  (before → after)
+        # We compare each widget's existing bg/fg to the class attrs and remap.
+        # Build a lookup of ALL class color attrs so we can match any of them.
+        COLOR_ATTRS = [
+            "BG", "BG2", "BG3", "ACCENT", "ACCENT2",
+            "TEXT", "TEXTDIM", "BORDER", "CONSOLE",
+            "GREEN", "RED", "YELLOW",
+        ]
+
+        def _recolor(widget):
+            try:
+                wtype = widget.winfo_class()
+            except Exception:
+                return
+
+            # Skip ttk widgets — handled by style engine
+            if wtype.startswith("T") and wtype not in ("Text", "Toplevel"):
+                for child in widget.winfo_children():
+                    _recolor(child)
+                return
+
+            try:
+                cfg = {}
+                cur_bg = widget.cget("bg") if wtype not in ("Text",) else widget.cget("background")
+
+                # Match current bg to one of our color roles and remap
+                # We identify the role by checking which class attr it was
+                # closest to before the theme change — but since we've already
+                # updated the class attrs, we just pick the "nearest" new color.
+                # Simpler: maintain a role-map per widget class:
+                if wtype in ("Frame", "Canvas"):
+                    # Frames are either BG, BG2, or BG3
+                    cfg["bg"] = _nearest_bg(cur_bg)
+                elif wtype == "Label":
+                    cfg["bg"] = _nearest_bg(cur_bg)
+                    try:
+                        cur_fg = widget.cget("fg")
+                        cfg["fg"] = _nearest_fg(cur_fg)
+                    except Exception:
+                        pass
+                elif wtype in ("Button", "Checkbutton", "Radiobutton"):
+                    cfg["bg"]             = _nearest_bg(cur_bg)
+                    cfg["activebackground"] = self.ACCENT2
+                    try:
+                        cur_fg = widget.cget("fg")
+                        cfg["fg"] = _nearest_fg(cur_fg)
+                    except Exception:
+                        pass
+                    try:
+                        cfg["selectcolor"] = self.BG3
+                    except Exception:
+                        pass
+                elif wtype in ("Entry", "Spinbox"):
+                    cfg["bg"]             = self.BG3
+                    cfg["fg"]             = self.TEXT
+                    cfg["insertbackground"] = self.TEXT
+                    cfg["relief"]         = "flat"
+                elif wtype in ("Listbox",):
+                    cfg["bg"]             = self.BG3
+                    cfg["fg"]             = self.TEXT
+                    cfg["selectbackground"] = self.ACCENT
+                    cfg["selectforeground"] = "#ffffff"
+                elif wtype == "Text":
+                    cfg["background"]     = self.CONSOLE
+                    cfg["foreground"]     = self.TEXT
+                    cfg["insertbackground"] = self.TEXT
+
+                if cfg:
+                    widget.configure(**cfg)
+            except Exception:
+                pass
+
+            for child in widget.winfo_children():
+                _recolor(child)
+
+        # Build sorted lists of background and foreground colors for nearest-match
+        _bg_colors = [self.BG, self.BG2, self.BG3, self.CONSOLE, self.BORDER]
+        _fg_colors = [self.TEXT, self.TEXTDIM, self.ACCENT, self.ACCENT2,
+                      self.GREEN, self.RED, self.YELLOW, "#ffffff", "#000000"]
+
+        def _color_distance(c1, c2):
+            """Simple RGB distance between two hex colors."""
+            try:
+                def _parse(c):
+                    c = c.strip("#")
+                    if len(c) == 3:
+                        c = c[0]*2 + c[1]*2 + c[2]*2
+                    return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+                r1,g1,b1 = _parse(c1)
+                r2,g2,b2 = _parse(c2)
+                return (r1-r2)**2 + (g1-g2)**2 + (b1-b2)**2
+            except Exception:
+                return 999999
+
+        def _nearest_bg(cur):
+            return min(_bg_colors, key=lambda c: _color_distance(cur, c))
+
+        def _nearest_fg(cur):
+            return min(_fg_colors, key=lambda c: _color_distance(cur, c))
+
+        _recolor(self.root)
+
+        # Update status dot color explicitly since it uses dynamic colors
+        try:
+            running = "Stopped" not in self._status_dot.cget("text")
+            self._status_dot.configure(
+                bg=self.BG2,
+                fg=self.GREEN if running else self.RED)
+        except Exception:
+            pass
 
     def _find_notebook(self):
         """
@@ -3796,9 +4109,12 @@ class UltraBotGUI:
         Destroys and rebuilds the entire UI so every widget picks up the
         new colors from class attributes. Restores the active tab afterwards.
         """
+        # Disable the tab-change dirty guard during rebuild —
+        # destroying the Notebook fires <<NotebookTabChanged>> which would
+        # trigger the unsaved-changes messagebox on a half-destroyed UI.
+        self._switching_tab = True
+
         # Remember which tab was open (by index).
-        # Must search recursively because the Notebook is inside nb_outer,
-        # not a direct child of root.
         active_tab = 4   # default: stay on Appearance tab
         try:
             nb = self._find_notebook()
@@ -3840,6 +4156,7 @@ class UltraBotGUI:
         self._step_items   = []
         self._unsaved_tabs = set()
         self._current_tab  = 0
+        self._dirty_tabs   = set()   # clear dirty flags — widgets are fresh
         self._build_ui()
 
         # Restore tab — search recursively again after rebuild
@@ -3858,6 +4175,11 @@ class UltraBotGUI:
             self._console_redir.start()
 
         self.root.update_idletasks()
+        # Re-enable the dirty guard now that UI is fully rebuilt
+        self._switching_tab = False
+        # Reset previous-tab tracker so the first switch after rebuild
+        # doesn't falsely trigger the unsaved-changes dialog
+        self._prev_tab_index = active_tab
 
     def _rebuild_styles_and_refresh(self):
         self._full_ui_rebuild()
@@ -4470,6 +4792,11 @@ class UltraBotGUI:
         obs_trigger("bot_start")
         _reset_session_stats()
         _append_event("BOT_START", "system", f"video_id={VIDEO_ID} vm={VM_NAME}")
+        if _gui_app is not None:
+            try:
+                _gui_app._append_chat_system(f"Bot started — listening on {VIDEO_ID}")
+            except Exception:
+                pass
 
         # Start scheduler background thread (one instance, idempotent)
         running_names = {t.name for t in threading.enumerate()}
@@ -4510,6 +4837,9 @@ class UltraBotGUI:
             self._bot_running = False
             _multi_stream_bots.clear()
             self.root.after(0, lambda: self._set_status("Stopped", self.RED))
+            if _gui_app is not None:
+                try: _gui_app._append_chat_system("Bot stopped.")
+                except Exception: pass
 
     def _minimize_to_tray(self):
         if not _PYSTRAY_OK:
@@ -6431,6 +6761,132 @@ class UltraBotGUI:
         if sel:
             self._rpc_bl_listbox.delete(sel[0])
 
+    # ──────────────── TAB 15 : RECONNECT ────────────────
+    def _build_reconnect_tab(self, parent):
+        parent.configure(style="TFrame")
+
+        hdr = tk.Frame(parent, bg=self.BG)
+        hdr.pack(fill="x", padx=16, pady=(14, 4))
+        tk.Label(hdr, text="🔄  Auto-Reconnect Settings",
+                 bg=self.BG, fg=self.ACCENT,
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        tk.Label(hdr,
+                 text="Configure how the bot behaves when the YouTube chat connection drops.",
+                 bg=self.BG, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
+
+        card = ttk.Frame(parent, style="Card.TFrame", padding=20)
+        card.pack(fill="x", padx=12, pady=(10, 6))
+
+        ROWS = [
+            ("max_failures",      "Max consecutive failures",
+             "Stop the bot automatically after this many failures in a row.\n"
+             "Set to 0 to retry forever."),
+            ("base_delay",        "Base retry delay (seconds)",
+             "How long to wait after the first failure before retrying.\n"
+             "Subsequent failures wait longer (exponential backoff)."),
+            ("max_delay",         "Maximum retry delay (seconds)",
+             "The upper limit on how long to wait between retries.\n"
+             "Prevents very long waits after many failures."),
+            ("notify_threshold",  "Notify after N failures",
+             "Show a desktop notification after this many consecutive failures.\n"
+             "Set to 0 to disable notifications."),
+        ]
+
+        self._reconn_vars = {}
+        for row_i, (key, label, hint) in enumerate(ROWS):
+            tk.Label(card, text=label,
+                     bg=self.BG2, fg=self.TEXT,
+                     font=("Segoe UI", 10, "bold")).grid(
+                     row=row_i * 2, column=0, sticky="w",
+                     pady=(16 if row_i else 0, 0))
+            tk.Label(card, text=hint,
+                     bg=self.BG2, fg=self.TEXTDIM,
+                     font=("Segoe UI", 8),
+                     wraplength=480, justify="left").grid(
+                     row=row_i * 2 + 1, column=0, sticky="w", padx=(16, 0))
+            var = tk.IntVar(value=RECONNECT_CONFIG.get(key, 0))
+            self._reconn_vars[key] = var
+            tk.Spinbox(card, textvariable=var,
+                       from_=0, to=3600, width=7,
+                       bg=self.BG3, fg=self.TEXT,
+                       insertbackground=self.TEXT,
+                       buttonbackground=self.BG3,
+                       font=("Segoe UI", 12, "bold"),
+                       relief="flat", bd=1).grid(
+                       row=row_i * 2, column=1, rowspan=2,
+                       padx=(24, 0), pady=(16 if row_i else 0, 0), sticky="n")
+
+        card.columnconfigure(0, weight=1)
+
+        # Status card
+        status_card = ttk.Frame(parent, style="Card.TFrame", padding=14)
+        status_card.pack(fill="x", padx=12, pady=(0, 6))
+        tk.Label(status_card, text="Current Status",
+                 bg=self.BG2, fg=self.ACCENT,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 6))
+        self._reconn_status_lbl = tk.Label(
+            status_card, text="No connection failures.",
+            bg=self.BG2, fg=self.GREEN,
+            font=("Segoe UI", 9))
+        self._reconn_status_lbl.pack(anchor="w")
+        self._root_after_reconnect_poll()
+
+        # Save button
+        btn_row = tk.Frame(parent, bg=self.BG)
+        btn_row.pack(fill="x", padx=12, pady=(10, 0))
+        ttk.Button(btn_row, text="💾 Save Reconnect Config",
+                   style="Green.TButton",
+                   command=self._save_reconnect_config).pack(side="left")
+
+        self._reconn_saved_lbl = tk.Label(parent, text="",
+                                          bg=self.BG, fg=self.GREEN,
+                                          font=("Segoe UI", 9))
+        self._reconn_saved_lbl.pack(anchor="w", padx=16, pady=(4, 0))
+
+    def _root_after_reconnect_poll(self):
+        """Poll the bot's reconnect failure count and update the status label."""
+        def _poll():
+            try:
+                from threading import enumerate as _tenum
+                bot_threads = [t for t in _tenum() if t.name == "bot_main"]
+                # Find the current YouTubeChatBot instance via _gui_app
+                failures = 0
+                if _gui_app and hasattr(_gui_app, '_bot_instance') and _gui_app._bot_instance:
+                    failures = getattr(_gui_app._bot_instance, '_reconnect_failures', 0)
+
+                if failures == 0:
+                    self._reconn_status_lbl.configure(
+                        text="Connected — no failures.", fg=self.GREEN)
+                elif failures < RECONNECT_CONFIG.get("notify_threshold", 3):
+                    self._reconn_status_lbl.configure(
+                        text=f"Reconnecting... ({failures} consecutive failure(s))",
+                        fg=self.YELLOW)
+                else:
+                    max_f = RECONNECT_CONFIG.get("max_failures", 10)
+                    self._reconn_status_lbl.configure(
+                        text=f"WARNING: {failures} consecutive failure(s)"
+                             + (f" — bot stops at {max_f}" if max_f > 0 else " — retrying forever"),
+                        fg=self.RED)
+            except Exception:
+                pass
+            self.root.after(3000, _poll)
+        self.root.after(3000, _poll)
+
+    def _save_reconnect_config(self):
+        for key, var in self._reconn_vars.items():
+            try:
+                RECONNECT_CONFIG[key] = max(0, int(var.get()))
+            except (ValueError, tk.TclError):
+                pass
+        save_reconnect_config()
+        self._reconn_saved_lbl.configure(
+            text=f"Saved — max:{RECONNECT_CONFIG['max_failures']}  "
+                 f"base:{RECONNECT_CONFIG['base_delay']}s  "
+                 f"max-delay:{RECONNECT_CONFIG['max_delay']}s  "
+                 f"notify@:{RECONNECT_CONFIG['notify_threshold']}")
+        self._log("[Reconnect] Config saved.")
+
     # ──────────────── Welcome / User Guide ────────────────
     GUIDE_FLAG_FILE = "guide_seen.flag"
 
@@ -6915,6 +7371,7 @@ if __name__ == '__main__':
     load_multi_stream_config()
     load_scheduler_config()
     load_realpc_config()
+    load_reconnect_config()
     _update_splash(97, "Building interface...")
 
     # Reuse the hidden host root that was created alongside the splash.
