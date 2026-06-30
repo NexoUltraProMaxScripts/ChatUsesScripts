@@ -44,7 +44,7 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & AUTO-UPDATE =========================
-VERSION = "29.7.0"   # increment this with every release
+VERSION = "29.8.0"   # increment this with every release
 
 # Replace these two URLs with your own GitHub repo paths.
 # GITHUB_VERSION_URL  → raw URL of version.json in your repo
@@ -3191,7 +3191,7 @@ class UltraBotGUI:
         # ── Unsaved-changes guard: intercept tab switches ──
         # Tab indices that can have unsaved state (matched by name text prefix):
         # 1=Commands, 3=OS Voting, 5=OBS, 9=Permissions, 10=Sound&TTS,
-        # 11=Multi-Stream, 12=Scheduler
+        # 11=Multi-Stream, 12=Scheduler, 13=Real PC, 14=Reconnect
         def _on_tab_changed(event):
             try:
                 new_idx = nb.index(nb.select())
@@ -3215,6 +3215,8 @@ class UltraBotGUI:
                             10: self._save_sound_config,
                             11: self._ms_save,
                             12: self._sched_save,
+                            13: self._rpc_save,
+                            14: self._save_reconnect_config,
                         }
                         save_fn = save_map.get(old_idx)
                         if save_fn:
@@ -3939,7 +3941,7 @@ class UltraBotGUI:
             setattr(self.__class__, key, val)
             if hasattr(self, '_color_vars') and key in self._color_vars:
                 self._color_vars[key].set(val)
-        self._apply_theme_live()
+        self._full_ui_rebuild()
         self._log(f"[Appearance] Applied preset: {name}")
 
     def _pick_color(self, key):
@@ -3948,145 +3950,19 @@ class UltraBotGUI:
         result  = colorchooser.askcolor(color=current, title=f"Pick color for {key}")
         if result and result[1]:
             setattr(self.__class__, key, result[1])
-            self._apply_theme_live()
+            self._full_ui_rebuild()
 
     def _apply_color_entry(self, key):
         val = self._color_vars[key].get().strip()
         if not (val.startswith("#") and len(val) in (4, 7)):
             return
         setattr(self.__class__, key, val)
-        self._apply_theme_live()
+        self._full_ui_rebuild()
 
     def _apply_font_size(self):
         fs = self._font_size_var.get()
         self.__class__._FONT_SIZE = fs
-        self._apply_theme_live()
-
-    def _apply_theme_live(self):
-        """
-        Apply the current color/font theme to ALL existing widgets WITHOUT
-        destroying or rebuilding anything.  The bot keeps running, the
-        console is untouched, and the YouTube connection stays open.
-
-        Strategy:
-          1. Rebuild ttk styles  — covers all ttk widgets automatically.
-          2. Walk every tk (non-ttk) widget and re-configure bg/fg/font
-             based on its role (inferred from current colors).
-          3. Update the root window background.
-        """
-        self._build_styles()
-        self.root.configure(bg=self.BG)
-
-        # Color mapping: current-color → new-color  (before → after)
-        # We compare each widget's existing bg/fg to the class attrs and remap.
-        # Build a lookup of ALL class color attrs so we can match any of them.
-        COLOR_ATTRS = [
-            "BG", "BG2", "BG3", "ACCENT", "ACCENT2",
-            "TEXT", "TEXTDIM", "BORDER", "CONSOLE",
-            "GREEN", "RED", "YELLOW",
-        ]
-
-        def _recolor(widget):
-            try:
-                wtype = widget.winfo_class()
-            except Exception:
-                return
-
-            # Skip ttk widgets — handled by style engine
-            if wtype.startswith("T") and wtype not in ("Text", "Toplevel"):
-                for child in widget.winfo_children():
-                    _recolor(child)
-                return
-
-            try:
-                cfg = {}
-                cur_bg = widget.cget("bg") if wtype not in ("Text",) else widget.cget("background")
-
-                # Match current bg to one of our color roles and remap
-                # We identify the role by checking which class attr it was
-                # closest to before the theme change — but since we've already
-                # updated the class attrs, we just pick the "nearest" new color.
-                # Simpler: maintain a role-map per widget class:
-                if wtype in ("Frame", "Canvas"):
-                    # Frames are either BG, BG2, or BG3
-                    cfg["bg"] = _nearest_bg(cur_bg)
-                elif wtype == "Label":
-                    cfg["bg"] = _nearest_bg(cur_bg)
-                    try:
-                        cur_fg = widget.cget("fg")
-                        cfg["fg"] = _nearest_fg(cur_fg)
-                    except Exception:
-                        pass
-                elif wtype in ("Button", "Checkbutton", "Radiobutton"):
-                    cfg["bg"]             = _nearest_bg(cur_bg)
-                    cfg["activebackground"] = self.ACCENT2
-                    try:
-                        cur_fg = widget.cget("fg")
-                        cfg["fg"] = _nearest_fg(cur_fg)
-                    except Exception:
-                        pass
-                    try:
-                        cfg["selectcolor"] = self.BG3
-                    except Exception:
-                        pass
-                elif wtype in ("Entry", "Spinbox"):
-                    cfg["bg"]             = self.BG3
-                    cfg["fg"]             = self.TEXT
-                    cfg["insertbackground"] = self.TEXT
-                    cfg["relief"]         = "flat"
-                elif wtype in ("Listbox",):
-                    cfg["bg"]             = self.BG3
-                    cfg["fg"]             = self.TEXT
-                    cfg["selectbackground"] = self.ACCENT
-                    cfg["selectforeground"] = "#ffffff"
-                elif wtype == "Text":
-                    cfg["background"]     = self.CONSOLE
-                    cfg["foreground"]     = self.TEXT
-                    cfg["insertbackground"] = self.TEXT
-
-                if cfg:
-                    widget.configure(**cfg)
-            except Exception:
-                pass
-
-            for child in widget.winfo_children():
-                _recolor(child)
-
-        # Build sorted lists of background and foreground colors for nearest-match
-        _bg_colors = [self.BG, self.BG2, self.BG3, self.CONSOLE, self.BORDER]
-        _fg_colors = [self.TEXT, self.TEXTDIM, self.ACCENT, self.ACCENT2,
-                      self.GREEN, self.RED, self.YELLOW, "#ffffff", "#000000"]
-
-        def _color_distance(c1, c2):
-            """Simple RGB distance between two hex colors."""
-            try:
-                def _parse(c):
-                    c = c.strip("#")
-                    if len(c) == 3:
-                        c = c[0]*2 + c[1]*2 + c[2]*2
-                    return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
-                r1,g1,b1 = _parse(c1)
-                r2,g2,b2 = _parse(c2)
-                return (r1-r2)**2 + (g1-g2)**2 + (b1-b2)**2
-            except Exception:
-                return 999999
-
-        def _nearest_bg(cur):
-            return min(_bg_colors, key=lambda c: _color_distance(cur, c))
-
-        def _nearest_fg(cur):
-            return min(_fg_colors, key=lambda c: _color_distance(cur, c))
-
-        _recolor(self.root)
-
-        # Update status dot color explicitly since it uses dynamic colors
-        try:
-            running = "Stopped" not in self._status_dot.cget("text")
-            self._status_dot.configure(
-                bg=self.BG2,
-                fg=self.GREEN if running else self.RED)
-        except Exception:
-            pass
+        self._full_ui_rebuild()
 
     def _find_notebook(self):
         """
@@ -6595,6 +6471,13 @@ class UltraBotGUI:
                    style="Green.TButton",
                    command=self._rpc_save).pack(side="left")
 
+        # ── Dirty-tracking: mark tab 13 (Real PC) as unsaved on any change ──
+        self._trace_dirty(13,
+            self._rpc_vid_var, self._rpc_cd_var, self._rpc_step_var,
+            self._rpc_maxtype_var, self._rpc_scroll_var,
+            self._rpc_failsafe_var, self._rpc_text_only_var,
+            self._rpc_wl_only_var, *self._rpc_allow_vars.values())
+
         # Wire live log to event log entries tagged REALPC_*
         self._rpc_log_callback_active = True
         self._start_rpc_log_poller()
@@ -6709,6 +6592,7 @@ class UltraBotGUI:
     def _rpc_save(self):
         self._rpc_collect_to_config()
         save_realpc_config()
+        self._clear_dirty(13)
         messagebox.showinfo("Saved", "Real PC Control config saved.")
 
     def _rpc_collect_to_config(self):
@@ -6744,22 +6628,26 @@ class UltraBotGUI:
         if user and user not in self._rpc_wl_listbox.get(0, "end"):
             self._rpc_wl_listbox.insert("end", user)
         self._rpc_wl_entry.set("")
+        self._mark_dirty(13)
 
     def _rpc_wl_remove(self):
         sel = self._rpc_wl_listbox.curselection()
         if sel:
             self._rpc_wl_listbox.delete(sel[0])
+            self._mark_dirty(13)
 
     def _rpc_bl_add(self):
         user = normalize_username(self._rpc_bl_entry.get())
         if user and user not in self._rpc_bl_listbox.get(0, "end"):
             self._rpc_bl_listbox.insert("end", user)
         self._rpc_bl_entry.set("")
+        self._mark_dirty(13)
 
     def _rpc_bl_remove(self):
         sel = self._rpc_bl_listbox.curselection()
         if sel:
             self._rpc_bl_listbox.delete(sel[0])
+            self._mark_dirty(13)
 
     # ──────────────── TAB 15 : RECONNECT ────────────────
     def _build_reconnect_tab(self, parent):
@@ -6818,6 +6706,9 @@ class UltraBotGUI:
                        padx=(24, 0), pady=(16 if row_i else 0, 0), sticky="n")
 
         card.columnconfigure(0, weight=1)
+
+        # ── Dirty-tracking: mark tab 14 (Reconnect) as unsaved on any change ──
+        self._trace_dirty(14, *self._reconn_vars.values())
 
         # Status card
         status_card = ttk.Frame(parent, style="Card.TFrame", padding=14)
@@ -6880,6 +6771,7 @@ class UltraBotGUI:
             except (ValueError, tk.TclError):
                 pass
         save_reconnect_config()
+        self._clear_dirty(14)
         self._reconn_saved_lbl.configure(
             text=f"Saved — max:{RECONNECT_CONFIG['max_failures']}  "
                  f"base:{RECONNECT_CONFIG['base_delay']}s  "
