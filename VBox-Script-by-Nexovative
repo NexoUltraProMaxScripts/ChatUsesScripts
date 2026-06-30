@@ -52,6 +52,45 @@ VERSION = "29.8.0"   # increment this with every release
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/NexoUltraProMaxScripts/ChatUsesScripts/refs/heads/main/version.json"
 GITHUB_SCRIPT_URL  = "https://raw.githubusercontent.com/NexoUltraProMaxScripts/ChatUsesScripts/refs/heads/main/VBox-Script-by-Nexovative"
 
+# Public key used to verify the signature of downloaded updates.
+# This is SAFE to keep here — it can only verify signatures, not create them.
+# Generate this pair locally with generate_keys.py and paste the public key below.
+UPDATE_PUBLIC_KEY_HEX = "13eebf036b59fe64547d23cd2e3e23fae1d5ee086e912939a91d5535ed4df08b"
+
+
+def _verify_update_signature(file_bytes, expected_sha256_hex, signature_hex):
+    """
+    Verifies that file_bytes matches the expected SHA-256 hash, and that the
+    hash was signed by the holder of the private key matching
+    UPDATE_PUBLIC_KEY_HEX. Returns True only if both checks pass.
+    """
+    import hashlib
+    import binascii
+
+    try:
+        from nacl.signing import VerifyKey
+        from nacl.exceptions import BadSignatureError
+    except ImportError:
+        print("[Updater] PyNaCl is not installed; cannot verify update signature. Aborting update.")
+        return False
+
+    actual_hash = hashlib.sha256(file_bytes).hexdigest()
+    if actual_hash != expected_sha256_hex:
+        print("[Updater] Hash mismatch -- downloaded file does not match version.json. Rejecting update.")
+        return False
+
+    try:
+        verify_key = VerifyKey(binascii.unhexlify(UPDATE_PUBLIC_KEY_HEX))
+        verify_key.verify(expected_sha256_hex.encode("ascii"), binascii.unhexlify(signature_hex))
+        return True
+    except BadSignatureError:
+        print("[Updater] Signature is invalid. Rejecting update.")
+        return False
+    except Exception as e:
+        print(f"[Updater] Signature verification error: {e}. Rejecting update.")
+        return False
+
+
 def _check_for_update():
     """
     Downloads version.json from GitHub and compares it to the running version.
@@ -72,8 +111,10 @@ def _check_for_update():
     try:
         _update_splash(8, "Checking for updates...")
         with urllib.request.urlopen(GITHUB_VERSION_URL, timeout=5) as resp:
-            data       = _json.loads(resp.read().decode("utf-8"))
-            latest_ver = data.get("version", "0.0.0").strip()
+            data            = _json.loads(resp.read().decode("utf-8"))
+            latest_ver      = data.get("version", "0.0.0").strip()
+            expected_sha256 = data.get("sha256", "").strip()
+            signature_hex   = data.get("signature", "").strip()
     except Exception as e:
         # Network unavailable or repo not configured — silently skip.
         print(f"[Updater] Could not check for updates: {e}")
@@ -87,6 +128,10 @@ def _check_for_update():
 
     if _ver_tuple(latest_ver) <= _ver_tuple(VERSION):
         print(f"[Updater] Up to date ({VERSION}).")
+        return False
+
+    if not expected_sha256 or not signature_hex:
+        print("[Updater] version.json is missing sha256/signature fields. Refusing to update.")
         return False
 
     # New version found — ask the user.
@@ -110,6 +155,20 @@ def _check_for_update():
     try:
         with urllib.request.urlopen(GITHUB_SCRIPT_URL, timeout=30) as resp:
             new_code = resp.read()
+
+        _update_splash(9, "Verifying update signature...")
+        if not _verify_update_signature(new_code, expected_sha256, signature_hex):
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                "Update rejected: the downloaded file failed signature verification.\n\n"
+                "This could mean the update source has been compromised.\n"
+                "The bot will start with the current version.",
+                "Update Security Warning",
+                MB_ICONERROR
+            )
+            print("[Updater] Update rejected due to failed signature verification.")
+            return False
+
         with open(tmp_path, "wb") as f:
             f.write(new_code)
         # Atomic replace: rename tmp over the live file.
