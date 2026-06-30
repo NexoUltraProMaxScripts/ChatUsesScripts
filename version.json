@@ -1,1 +1,5 @@
-{"version": "29.8.0"}
+{
+  "version": "29.9.0",
+  "sha256": "17d9fd5cb160af889b6f4aa97636d452e68c4fe80aad45062a5541b95375c3de",
+  "signature": "b12b7c1b15e86fd6ddbf548d04f9e7265bbd9ba0e07a782ae3c22ef07057d27a7a085a006ff1cfebd5beab29e4a65781877614631f8cb896de7d38f23e46c805"
+}
