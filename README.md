@@ -6,17 +6,5 @@
 
 **Download VirtualBox: https://www.virtualbox.org/wiki/Downloads**
 
-**Python 3.12**
-
-*pip install pytchat*
-
-*pip install pywin32*
-
-*pip install vncdotool*
-
-*pip install plyer*
-
-*pip install pystray*
-
-*pip install obsws-python*
+*pip install pytchat pywin32 vncdotool plyer pystray obsws-python*
 
