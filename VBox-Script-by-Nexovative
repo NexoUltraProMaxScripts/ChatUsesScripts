@@ -44,7 +44,7 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & AUTO-UPDATE =========================
-VERSION = "29.9.0"   # increment this with every release
+VERSION = "30.0.0"   # increment this with every release
 
 # Replace these two URLs with your own GitHub repo paths.
 # GITHUB_VERSION_URL  → raw URL of version.json in your repo
@@ -55,7 +55,7 @@ GITHUB_SCRIPT_URL  = "https://raw.githubusercontent.com/NexoUltraProMaxScripts/C
 # Public key used to verify the signature of downloaded updates.
 # This is SAFE to keep here — it can only verify signatures, not create them.
 # Generate this pair locally with generate_keys.py and paste the public key below.
-UPDATE_PUBLIC_KEY_HEX = "13eebf036b59fe64547d23cd2e3e23fae1d5ee086e912939a91d5535ed4df08b"
+UPDATE_PUBLIC_KEY_HEX = "93f1c0018ff6323ac5ccf45a304ae0d96750656b4c6cd469a98b5c21ed4977ed"
 
 
 def _verify_update_signature(file_bytes, expected_sha256_hex, signature_hex):
@@ -200,10 +200,16 @@ _splash_root   = None
 _splash_bar    = None
 _splash_label  = None
 _splash_pct    = None
+_splash_inner  = None   # inner frame, needed by the outro animation
+_splash_brand_label = None
+_splash_title_label = None
+_splash_by_label = None
+_splash_bar_bg = None
 _host_root     = None   # the one-and-only tk.Tk() instance (kept hidden during splash)
 
 def _create_splash():
     global _splash_root, _splash_bar, _splash_label, _splash_pct, _host_root
+    global _splash_inner, _splash_brand_label, _splash_title_label, _splash_by_label, _splash_bar_bg
 
     # Create the single tk.Tk() host window and keep it hidden.
     # All ttk styles will be registered on this interpreter.
@@ -228,16 +234,19 @@ def _create_splash():
     border.place(relx=0, rely=0, relwidth=1, relheight=1)
     inner = tk.Frame(border, bg="#0f0f1a")
     inner.pack(fill="both", expand=True)
+    _splash_inner = inner
 
     # "Script by Nexovative"
-    tk.Label(inner, text="Script by Nexovative",
+    _splash_by_label = tk.Label(inner, text="Script by Nexovative",
              bg="#0f0f1a", fg="#f0c060",
-             font=("Segoe UI", 11, "bold")).pack(pady=(22, 0))
+             font=("Segoe UI", 11, "bold"))
+    _splash_by_label.pack(pady=(22, 0))
 
     # App title
-    tk.Label(inner, text="VirtualBox Chat Bot",
+    _splash_title_label = tk.Label(inner, text="Nexovative Control Center",
              bg="#0f0f1a", fg="#ffffff",
-             font=("Segoe UI", 18, "bold")).pack(pady=(4, 0))
+             font=("Segoe UI", 18, "bold"))
+    _splash_title_label.pack(pady=(4, 0))
 
     # Status label
     _splash_label = tk.Label(inner, text="Loading GUI...",
@@ -249,6 +258,7 @@ def _create_splash():
     bar_bg = tk.Frame(inner, bg="#1e1e2e", height=18, width=380)
     bar_bg.pack(pady=(0, 8))
     bar_bg.pack_propagate(False)
+    _splash_bar_bg = bar_bg
 
     _splash_bar = tk.Frame(bar_bg, bg="#3ddc97", width=0, height=18)
     _splash_bar.place(x=0, y=0, relheight=1)
@@ -257,6 +267,12 @@ def _create_splash():
                             bg="#0f0f1a", fg="#3ddc97",
                             font=("Segoe UI", 8))
     _splash_pct.pack()
+
+    # Hidden until loading finishes — shows the animated "NEXOVATIVE" reveal.
+    _splash_brand_label = tk.Label(inner, text="",
+                                    bg="#0f0f1a", fg="#7c5cbf",
+                                    font=("Segoe UI", 22, "bold"))
+    # not packed yet — packed only when the intro animation starts
 
     _splash_root = splash
     splash.lift()
@@ -276,6 +292,77 @@ def _update_splash(pct, label=None):
         _splash_root.update()
     except Exception:
         pass
+
+def _play_splash_outro_animation():
+    """
+    Called once loading reaches 100%. Hides the progress bar / status text
+    and plays a typewriter-style reveal of "NEXOVATIVE" with a color sweep,
+    then a hold, before the splash is destroyed and the main window is
+    shown. Fully synchronous (uses time.sleep + root.update) so it fits
+    into the existing linear startup sequence without needing Tk's event
+    loop to already be running.
+    """
+    global _splash_root, _splash_label, _splash_bar_bg, _splash_pct
+    global _splash_title_label, _splash_by_label, _splash_brand_label
+
+    if _splash_root is None:
+        print("[Splash] outro animation skipped — no splash root")
+        return
+    try:
+        print("[Splash] playing NEXOVATIVE outro animation...")
+
+        # Force the splash to the very front and keep it there for the
+        # duration of the animation. Without this, if another window
+        # (console, another app, the OS itself) stole focus while we were
+        # loading, the animation would silently play behind it and the
+        # user would never see it.
+        _splash_root.deiconify()
+        _splash_root.lift()
+        _splash_root.attributes("-topmost", True)
+        _splash_root.focus_force()
+        _splash_root.update_idletasks()
+        _splash_root.update()
+
+        # Hide the loading-specific widgets — this is a reveal moment now.
+        for w in (_splash_label, _splash_bar_bg, _splash_pct,
+                  _splash_title_label, _splash_by_label):
+            if w is not None:
+                w.pack_forget()
+
+        _splash_brand_label.configure(text="", fg="#7c5cbf")
+        _splash_brand_label.pack(pady=(70, 0))
+        _splash_root.update_idletasks()
+        _splash_root.update()
+        time.sleep(0.15)   # tiny beat so the cleared layout is visible first
+
+        word = "NEXOVATIVE"
+        # Typewriter reveal, letter by letter — slow enough to actually see.
+        for i in range(1, len(word) + 1):
+            _splash_brand_label.configure(text=word[:i])
+            _splash_root.update_idletasks()
+            _splash_root.update()
+            time.sleep(0.11)
+
+        time.sleep(0.25)
+
+        # Color sweep across a small palette for a "shine" pulse.
+        pulse_colors = ["#3ddc97", "#a684e8", "#f0c060", "#a684e8", "#7c5cbf"]
+        for color in pulse_colors:
+            _splash_brand_label.configure(fg=color)
+            _splash_root.update_idletasks()
+            _splash_root.update()
+            time.sleep(0.16)
+
+        # Hold on the finished word for a beat before closing.
+        time.sleep(0.6)
+        try:
+            _splash_root.attributes("-topmost", False)
+        except Exception:
+            pass
+        print("[Splash] outro animation finished")
+    except Exception as e:
+        print(f"[Splash] outro animation error: {e}")
+
 
 def _close_splash():
     global _splash_root
@@ -306,15 +393,34 @@ def _safe_signal(sig, handler):
 _signal_module.signal = _safe_signal
 
 _update_splash(20, "Importing pytchat...")
-import pytchat
+try:
+    import pytchat
+    _PYTCHAT_OK = True
+except ImportError:
+    pytchat = None
+    _PYTCHAT_OK = False
+    print("[Startup] pytchat not installed — YouTube chat reading will be disabled. Run: pip install pytchat")
 
 _update_splash(35, "Importing VirtualBox API...")
-from vboxapi import VirtualBoxManager
+try:
+    from vboxapi import VirtualBoxManager
+    _VBOXAPI_OK = True
+except ImportError:
+    VirtualBoxManager = None
+    _VBOXAPI_OK = False
+    print("[Startup] vboxapi not installed — VirtualBox mouse/session control will be disabled. "
+          "Install the VirtualBox SDK for your Python environment.")
 
 _update_splash(50, "Importing system libraries...")
 import threading
 import re
-import win32com.client
+try:
+    import win32com.client
+    _WIN32COM_OK = True
+except ImportError:
+    win32com = None
+    _WIN32COM_OK = False
+    print("[Startup] pywin32 not installed — text-to-speech (SAPI) will be disabled. Run: pip install pywin32")
 import http.server
 import socketserver
 import json
@@ -709,6 +815,7 @@ REALPC_CONFIG = {
     "mouse_step":        50,       # pixels per !moverel step
     "scroll_step":       3,        # clicks per !scroll
     "max_type_length":   100,      # max chars per !type command
+    "danger_filter_enabled": True,  # HARD block of dangerous OS-level commands/hotkeys — default ON
 }
 
 _realpc_bot_thread   = None
@@ -760,6 +867,214 @@ def _realpc_check_cooldown(username: str) -> bool:
     return True
 
 
+# ========================= REAL PC — DANGEROUS COMMAND FILTER =========================
+# HARD-CODED safety net for the Real PC Control feature. This is intentionally
+# NOT fully configurable from the GUI — only the master on/off switch is exposed,
+# and turning it off requires two explicit warning dialogs.
+#
+# IMPORTANT: this filter does NOT just look at one command in isolation.
+# A single !type/!send call rarely contains a full dangerous command — chat
+# users can (and will) split it across many small steps to dodge a naive
+# per-command filter, e.g.:
+#
+#   !type shu   !type tdown          -> spells "shutdown"
+#   !type rd5   !key backspace   !type m2   !key backspace   -> "rd" + "m" via edits
+#   !key s !key h !key u !key t !key d !key o !key w !key n  -> one key at a time
+#
+# To catch this, we keep a small per-user ROLLING TEXT BUFFER that simulates
+# what is actually being typed on the real screen: !type/!send/!key append
+# characters, !backspace removes the last character, !space appends a space,
+# !enter/!send flushes (real commands are usually submitted with Enter, but
+# we still keep scanning right up to that point). Every mutation re-scans the
+# buffer (with whitespace stripped, to catch spaced-out spelling like
+# "s h u t d o w n") against the dangerous pattern list.
+
+# Substrings that indicate an attempt to run destructive or system-level
+# commands (typed directly, or via Run/terminal opened some other way).
+# Matching is case-insensitive and checked with whitespace fully stripped,
+# so spacing/chunking tricks don't bypass it.
+_REALPC_DANGEROUS_TEXT_PATTERNS = [
+    # Windows destructive / system commands
+    "formatc", "formatd", "formate", "del/f", "del/s", "del/q",
+    "rd/s", "rmdir/s", "deltree",
+    "diskpart", "cleanall",
+    # Power state — shutdown / restart / logoff, all forms
+    "shutdown", "logoff",
+    "restart-computer", "restart -computer", "restart–computer",
+    "stop-computer", "stop -computer",
+    "restart-service", "stop-service",
+    "shutdown.exe", "shutdown/r", "shutdown/s", "shutdown-r", "shutdown-s",
+    "-computerlocalhost", "win32_operatingsystem",   # WMI/CIM reboot vector
+    "invoke-cimmethod", "invoke-wmimethod",
+    "win32shutdown(",
+    "bcdedit", "bootrec",
+    "regdelete", "regadd", "regedit/s",
+    "netuser", "netlocalgroup",
+    "vssadmindelete", "wbadmindelete",
+    "cipher/w",
+    "taskkill/f", "stop-process", "kill-9",
+    "wmic",
+    # PowerShell invocation / obfuscation / remote-exec tricks
+    "powershell.exe", "powershell-", "pwsh.exe", "iwr(", "irm(",
+    "-encodedcommand", "-enc ", "-ec ",
+    "executionpolicybypass", "windowstylehidden", "-windowstylehidden",
+    "-noprofile",
+    "invoke-webrequest", "invoke-expression", "iex(",
+    "invoke-command",
+    "downloadstring", "downloadfile",
+    "certutil-urlcache", "certutil-decode",
+    "mshta.exe", "rundll32.exe",
+    "attrib+h", "attrib-h",
+    "sc.exedelete", "sc.exestop", "sc.execonfig", "sc.execreate",
+    "icacls", "takeown/f",
+    "schtasks", "at.exe",
+    "disable-windowsdefender", "set-mppreference", "-disablerealtimemonitoring",
+    # Cross-platform / shell destructive commands
+    "rm-rf", "rm-r", "sudorm", ":(){:|:&};:",  # fork bomb
+    "mkfs", "ddif=", ">/dev/sda", "chmod-r777", "chmod777/",
+    "sudodd", "sudomkfs",
+    "sudoshutdown", "sudoreboot", "sudohalt", "sudopoweroff",
+    "systemctlreboot", "systemctlpoweroff", "systemctlhalt",
+    "sudoinit0", "sudoinit6", "telinit0", "telinit6",
+    # Generic dangerous download/exec chains
+    "curlhttp", "wgethttp", "curl-o", "wget-o", "curl-s", "|bash", "|sh",
+]
+
+# Single keys that are dangerous as a standalone !key / !press regardless of
+# the typing buffer (they act immediately, not via typed text).
+_REALPC_DANGEROUS_KEYS = {
+    "delete", "del", "printscreen",
+}
+
+# Hotkeys that open OS-level surfaces are intentionally NOT hard-blocked here
+# (per design decision: focus protection on command/text content, not on
+# every possible key combo, since that list is trivially incomplete). If a
+# combo like Win+R opens a Run box, anything typed into it still has to pass
+# through the text buffer filter below before it can do anything.
+
+_realpc_typing_buffers = {}          # {username: "current simulated text"}
+_realpc_typing_buffer_lock = threading.Lock()
+_REALPC_BUFFER_MAX_LEN = 200         # hard cap so buffers can't grow unbounded
+
+
+def _realpc_buffer_get(username: str) -> str:
+    with _realpc_typing_buffer_lock:
+        return _realpc_typing_buffers.get(username, "")
+
+
+def _realpc_buffer_set(username: str, value: str):
+    with _realpc_typing_buffer_lock:
+        _realpc_typing_buffers[username] = value[-_REALPC_BUFFER_MAX_LEN:]
+
+
+def _realpc_buffer_reset(username: str):
+    with _realpc_typing_buffer_lock:
+        _realpc_typing_buffers[username] = ""
+
+
+def _realpc_scan_text_for_danger(text: str):
+    """Check a raw text string against dangerous patterns.
+    Both the text AND each pattern are whitespace-stripped before comparing,
+    so patterns can be written with spaces for readability but still match
+    text typed with different/no spacing (evasion-resistant)."""
+    compact = "".join(text.lower().split())
+    for pattern in _REALPC_DANGEROUS_TEXT_PATTERNS:
+        pattern_compact = "".join(pattern.lower().split())
+        if pattern_compact and pattern_compact in compact:
+            return pattern
+    return None
+
+
+# Map of !key / !press key names to the literal character they produce when
+# typed. pyautogui's press() accepts the punctuation character itself as the
+# key name (e.g. press('.') types a period, press('-') types a hyphen), so
+# most punctuation keys pass straight through. A few keys also have common
+# word aliases that map to the same character. Anything unmapped is treated
+# as a non-printing key (arrow keys, F-keys, etc.) and acts as a separator
+# so it can't silently glue two typed fragments together.
+_REALPC_KEY_TO_CHAR = {
+    **{c: c for c in "abcdefghijklmnopqrstuvwxyz0123456789"},
+    **{c: c for c in ".-/,;'[]\\=`~!@#$%^&*()_+{}|:\"<>?"},
+    "space": " ", "spacebar": " ",
+    "minus": "-", "subtract": "-",
+    "slash": "/", "divide": "/",
+    "period": ".", "decimal": ".",
+    "comma": ",",
+    "equal": "=", "equals": "=",
+}
+
+
+def _realpc_is_dangerous(action: str, args: str, username: str):
+    """
+    Hard-coded, STATEFUL danger check. Returns a human-readable reason string
+    if the command should be blocked, or None if it's fine. Also updates the
+    per-user typing buffer so multi-step spelling/backspace evasion is caught.
+    Runs BEFORE anything else, independent of allowed_actions / text_only
+    settings, as long as the danger filter is enabled.
+    """
+    text = (args or "")
+    text_norm = " ".join(text.lower().split())
+
+    # ── Direct single-shot check on this command's own text ──
+    # (covers the simple case: someone just types the whole dangerous
+    # command in one go, or pastes it via !send)
+    if action in ("type", "write", "text", "say", "send", "sendline", "typeenter"):
+        hit = _realpc_scan_text_for_danger(text_norm)
+        if hit:
+            return f"dangerous command text blocked: matched '{hit}'"
+
+    if action in ("key", "press"):
+        key = text.strip().lower()
+        if key in _REALPC_DANGEROUS_KEYS:
+            return f"dangerous key blocked: {key}"
+
+    # ── Rolling typing-buffer check ──
+    # Simulates what actually ends up on screen across MULTIPLE separate
+    # commands from the same user, catching chunked / backspace-edited /
+    # key-by-key spelling of a dangerous command.
+    buf = _realpc_buffer_get(username)
+
+    if action in ("type", "write", "text", "say"):
+        buf += text
+    elif action in ("send", "sendline", "typeenter"):
+        buf += text
+        # command is being "submitted" — check, then clear on send below
+    elif action in ("key", "press"):
+        key = text.strip().lower()
+        if key in ("enter", "return", "tab", "esc", "escape"):
+            # These keys submit/dismiss whatever was being typed — same as !enter.
+            buf += " "
+        else:
+            buf += _REALPC_KEY_TO_CHAR.get(key, " ")   # unmapped keys act as a separator
+    elif action == "space":
+        buf += " "
+    elif action == "enter":
+        buf += " "   # Enter submits — treat as a separator, then buffer clears below
+    elif action == "backspace":
+        buf = buf[:-1]
+    else:
+        # Any other action (mouse, screenshot, wait, etc.) doesn't affect typed text.
+        buf = buf  # no-op, keep as is
+
+    _realpc_buffer_set(username, buf)
+
+    hit = _realpc_scan_text_for_danger(buf)
+    if hit:
+        # Wipe the buffer so the block itself doesn't leave a dangerous
+        # fragment sitting there to be combined with the next attempt.
+        _realpc_buffer_reset(username)
+        return f"dangerous command assembled across multiple steps: matched '{hit}'"
+
+    # Enter/Send submits the line in real life — clear buffer afterwards
+    # so unrelated future typing doesn't inherit old (safe) leftover text.
+    if action in ("enter", "send", "sendline", "typeenter"):
+        _realpc_buffer_reset(username)
+    elif action in ("key", "press") and text.strip().lower() in ("enter", "return", "tab", "esc", "escape"):
+        _realpc_buffer_reset(username)
+
+    return None
+
+
 def _realpc_execute(username: str, action: str, args: str):
     """
     Execute a single Real-PC command.
@@ -768,6 +1083,17 @@ def _realpc_execute(username: str, action: str, args: str):
     """
     if not _PYAUTOGUI_OK:
         return
+
+    # ── HARD SAFETY FILTER — dangerous OS-level commands ──
+    # Runs first, independent of every other setting. Can only be disabled
+    # from the GUI, which requires two explicit warning confirmations.
+    if REALPC_CONFIG.get("danger_filter_enabled", True):
+        reason = _realpc_is_dangerous(action, args, username)
+        if reason:
+            print(f"[RealPC] BLOCKED ({reason}) — from {username}: !{action} {args!r}")
+            _realpc_set_status(f"⛔ Blocked dangerous command from {username}")
+            _append_event("REALPC_BLOCKED", username, f"!{action} {args!r} — {reason}")
+            return
 
     # Text-Only mode: only !type, !send (and aliases) are permitted
     TEXT_ONLY_ACTIONS = {"type", "write", "text", "say", "send", "sendline", "typeenter"}
@@ -962,6 +1288,9 @@ def _realpc_bot_loop():
         return
     if not _PYAUTOGUI_OK:
         _realpc_set_status("pyautogui not installed. Run: pip install pyautogui")
+        return
+    if not _PYTCHAT_OK:
+        _realpc_set_status("pytchat not installed. Run: pip install pytchat")
         return
 
     wl_only   = REALPC_CONFIG.get("whitelist_only", False)
@@ -1338,8 +1667,17 @@ def scheduler_loop():
     print("[Scheduler] Loop stopped.")
 
 _update_splash(85, "Connecting to VirtualBox...")
-mgr  = VirtualBoxManager(None, None)
-vbox = mgr.getVirtualBox()
+mgr  = None
+vbox = None
+if _VBOXAPI_OK:
+    try:
+        mgr  = VirtualBoxManager(None, None)
+        vbox = mgr.getVirtualBox()
+    except Exception as e:
+        mgr  = None
+        vbox = None
+        print(f"[Startup] Could not connect to VirtualBox: {e}. "
+              "VirtualBox-dependent features will be disabled.")
 _update_splash(92, "Loading configuration...")
 
 active_users = set()
@@ -1711,18 +2049,18 @@ THEMES = {
 }
 
 def load_appearance_config():
-    """Load saved appearance settings and apply them to UltraBotGUI class attributes."""
+    """Load saved appearance settings and apply them to NexovativeControlCenter class attributes."""
     try:
         if os.path.exists(APPEARANCE_CONFIG_FILE):
             with open(APPEARANCE_CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             colors = data.get("colors", {})
             for key, val in colors.items():
-                if hasattr(UltraBotGUI, key) and isinstance(val, str) and val.startswith("#"):
-                    setattr(UltraBotGUI, key, val)
+                if hasattr(NexovativeControlCenter, key) and isinstance(val, str) and val.startswith("#"):
+                    setattr(NexovativeControlCenter, key, val)
             font_size = data.get("font_size")
             if font_size:
-                UltraBotGUI._FONT_SIZE = int(font_size)
+                NexovativeControlCenter._FONT_SIZE = int(font_size)
             print(f"[Appearance] Config loaded.")
     except Exception as e:
         print(f"[Appearance] Load error: {e}")
@@ -2097,6 +2435,9 @@ def speak_text(text):
     if not SOUND_CONFIG.get("tts_enabled", True):
         return
     def _speak():
+        if not _WIN32COM_OK:
+            print("[Speech] pywin32 not installed — text-to-speech is disabled. Run: pip install pywin32")
+            return
         try:
             speaker = win32com.client.Dispatch("SAPI.SpVoice")
             rate   = int(SOUND_CONFIG.get("tts_rate", 150))
@@ -2944,7 +3285,7 @@ class ConsoleRedirect:
 
 
 # ========================= GUI =========================
-class UltraBotGUI:
+class NexovativeControlCenter:
     # ── Color palette ──
     BG       = "#0f0f1a"
     BG2      = "#16162a"
@@ -2963,7 +3304,7 @@ class UltraBotGUI:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("🤖 UltraBot Control Panel")
+        self.root.title("🤖 Nexovative Control Center")
         self.root.configure(bg=self.BG)
         self.root.resizable(True, True)
         # Open maximized (windowed fullscreen — not borderless, still has taskbar/titlebar)
@@ -3122,7 +3463,7 @@ class UltraBotGUI:
         title_bar = tk.Frame(self.root, bg=self.BG2, height=48)
         title_bar.pack(fill="x", side="top")
         title_bar.pack_propagate(False)
-        tk.Label(title_bar, text="🤖  UltraBot Control Panel",
+        tk.Label(title_bar, text="🤖  Nexovative Control Center",
                  bg=self.BG2, fg=self.TEXT,
                  font=("Segoe UI", 13, "bold")).pack(side="left", padx=16, pady=8)
         self._status_dot = tk.Label(title_bar, text="⬤  Stopped",
@@ -6319,6 +6660,35 @@ class UltraBotGUI:
                  bg=self.BG2, fg=self.ACCENT,
                  font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 4))
 
+        # ── Dangerous Command Filter toggle (HARD default ON) ──
+        self._rpc_danger_filter_var = tk.BooleanVar(
+            value=REALPC_CONFIG.get("danger_filter_enabled", True))
+
+        danger_row = tk.Frame(allow_card, bg=self.BG2)
+        danger_row.pack(fill="x", pady=(0, 8))
+        danger_row.bind("<MouseWheel>", _on_wheel)
+
+        danger_cb = tk.Checkbutton(
+            danger_row,
+            text="🛡  Dangerous Command Filter  —  hard-blocks destructive commands "
+                 "(format, shutdown, rm -rf, etc.), even if typed across multiple steps",
+            variable=self._rpc_danger_filter_var,
+            bg=self.BG2, fg=self.GREEN,
+            selectcolor=self.BG3, activebackground=self.BG2,
+            activeforeground=self.RED,
+            font=("Segoe UI", 9, "bold"),
+            command=self._rpc_on_danger_filter_toggle,
+        )
+        danger_cb.pack(side="left")
+        self._rpc_danger_filter_cb = danger_cb
+
+        tk.Label(allow_card,
+                 text="This protection is ON by default and is strongly recommended to keep on.",
+                 bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8)).pack(anchor="w", pady=(0, 8))
+
+        ttk.Separator(allow_card, orient="horizontal").pack(fill="x", pady=(0, 8))
+
         # Text-Only mode toggle
         self._rpc_text_only_var = tk.BooleanVar(
             value=REALPC_CONFIG.get("text_only", False))
@@ -6571,6 +6941,63 @@ class UltraBotGUI:
         """Called when the Text Only checkbox is clicked."""
         self._rpc_sync_text_only_ui()
 
+    def _rpc_on_danger_filter_toggle(self):
+        """
+        Called when the Dangerous Command Filter checkbox is clicked.
+        Turning the filter OFF requires two explicit hard warnings.
+        Turning it back ON never requires confirmation.
+        """
+        if self._rpc_danger_filter_var.get():
+            # User (re)enabled it — no confirmation needed, just apply.
+            REALPC_CONFIG["danger_filter_enabled"] = True
+            return
+
+        # User is trying to turn the filter OFF — hard-stop with 2 warnings.
+        # Warning 1
+        if not messagebox.askokcancel(
+            "🛑  Disable Dangerous Command Filter — Warning 1 of 2",
+            "You are about to DISABLE the Dangerous Command Filter.\n\n"
+            "This filter is the ONLY thing hard-blocking destructive commands "
+            "(format, shutdown, del /f, rm -rf, registry edits, PowerShell "
+            "download-and-run chains, etc.) sent by YouTube chat viewers — "
+            "including ones spelled out across multiple small steps to dodge "
+            "detection (e.g. typed in chunks, key-by-key, or edited with "
+            "backspace).\n\n"
+            "Without it, ANY viewer could potentially damage this computer, "
+            "delete files, or take actions with NO SAFETY NET.\n\n"
+            "Click OK to continue to the final warning, or Cancel to keep "
+            "the filter enabled.",
+            icon="warning",
+        ):
+            self._rpc_danger_filter_var.set(True)
+            return
+
+        # Warning 2 — final "I accept full responsibility" confirmation
+        if not messagebox.askokcancel(
+            "🛑  Disable Dangerous Command Filter — Warning 2 of 2  (Final)",
+            "FINAL CONFIRMATION:\n\n"
+            "By clicking OK you confirm that:\n\n"
+            "  • You are turning OFF the hard-coded protection against "
+            "destructive and dangerous commands.\n\n"
+            "  • YOU take FULL and SOLE responsibility for any damage, "
+            "data loss, security breach, or other consequence that results "
+            "from this computer being controlled by YouTube chat with this "
+            "protection disabled.\n\n"
+            "  • The developer (Nexovative) is NOT responsible under any "
+            "circumstances for the outcome of this decision.\n\n"
+            "Click OK to permanently disable the filter for this session, "
+            "or Cancel to keep it enabled.",
+            icon="warning",
+        ):
+            self._rpc_danger_filter_var.set(True)
+            return
+
+        # Both warnings accepted — actually disable it.
+        REALPC_CONFIG["danger_filter_enabled"] = False
+        _realpc_set_status("⚠ Dangerous Command Filter DISABLED by user")
+        _append_event("REALPC_DANGER_FILTER", "SYSTEM",
+                       "Dangerous command filter disabled by operator after double confirmation")
+
     def _rpc_sync_text_only_ui(self):
         """Grey out / restore category checkboxes based on Text Only state."""
         text_only = self._rpc_text_only_var.get()
@@ -6660,6 +7087,7 @@ class UltraBotGUI:
         REALPC_CONFIG["failsafe"]       = self._rpc_failsafe_var.get()
         REALPC_CONFIG["whitelist_only"] = self._rpc_wl_only_var.get()
         REALPC_CONFIG["text_only"]      = self._rpc_text_only_var.get()
+        REALPC_CONFIG["danger_filter_enabled"] = self._rpc_danger_filter_var.get()
         try:
             REALPC_CONFIG["cooldown"] = max(0.0, float(self._rpc_cd_var.get()))
         except (ValueError, tk.TclError):
@@ -6847,7 +7275,7 @@ class UltraBotGUI:
 
         W, H = 800, 560
         dlg = tk.Toplevel(self.root)
-        dlg.title("📖  UltraBot — User Guide")
+        dlg.title("📖  Nexovative Control Center — User Guide")
         dlg.configure(bg=self.BG)
         dlg.resizable(False, False)
         dlg.grab_set()
@@ -6860,7 +7288,7 @@ class UltraBotGUI:
         hdr = tk.Frame(dlg, bg=self.ACCENT, height=54)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
-        tk.Label(hdr, text="📖  UltraBot Control Panel — User Guide",
+        tk.Label(hdr, text="📖  Nexovative Control Center — User Guide",
                  bg=self.ACCENT, fg="#ffffff",
                  font=("Segoe UI", 13, "bold")).pack(side="left", padx=18, pady=10)
         tk.Label(hdr, text=f"v{VERSION}",
@@ -6925,7 +7353,7 @@ class UltraBotGUI:
         CHAPTERS = [
             ("🚀  Getting Started", [
                 ("h1",   "🚀  Getting Started"),
-                ("body", "Welcome to UltraBot! This guide explains every feature so you can hit the ground running."),
+                ("body", "Welcome to Nexovative Control Center! This guide explains every feature so you can hit the ground running."),
                 ("h2",   "First-time setup"),
                 ("body", "1.  Paste your YouTube Video ID into the Main tab."),
                 ("body", "    e.g. if your URL is  youtube.com/watch?v=abc123XYZ  →  enter  abc123XYZ"),
@@ -7195,6 +7623,10 @@ class UltraBotGUI:
                 ("body", "4.  Confirm all three safety warnings — read them carefully."),
                 ("h2",   "Safety warnings"),
                 ("body", "Starting the Real PC bot shows three mandatory confirmation dialogs explaining the risks.  You must click OK on all three before the bot starts.  This is intentional — giving chat access to your real computer is serious."),
+                ("h2",   "Dangerous Command Filter"),
+                ("body", "A hard-coded filter is ON by default and cannot be bypassed by chat.  It blocks destructive commands (format, shutdown, del /f, rm -rf, registry edits, PowerShell/download-and-run chains, etc.)."),
+                ("body", "The filter tracks what each viewer is actually typing across their commands, not just one command at a time — so splitting a command into pieces (!type shu then !type tdown), or spelling it key-by-key, or editing it with !backspace, does NOT get around it.  The moment the dangerous command would actually appear on screen, it's blocked."),
+                ("body", "You can turn this filter off in the Allowed Action Categories section, but doing so requires two separate hard warning confirmations.  Turning it off means you accept full responsibility for anything chat does to this computer — the developer is not responsible for the consequences."),
                 ("tip",  "Tip: enable Failsafe.  Move your mouse to the top-left corner of the screen to instantly abort all actions."),
                 ("tip",  "Tip: use the Whitelist to restrict which viewers can send commands."),
                 ("tip",  "Tip: disable action categories you don't need  (e.g. Screenshot, Combo)  in the Allowed Actions section."),
@@ -7313,6 +7745,57 @@ class UltraBotGUI:
 
 
 # ========================= MAIN =========================
+def _report_missing_libraries():
+    """
+    Show a single, friendly summary of any optional/required third-party
+    libraries that failed to import. The GUI still opens either way —
+    this is informational only, never a hard stop.
+    """
+    missing = []
+    if not _PYTCHAT_OK:
+        missing.append(("pytchat", "pip install pytchat",
+                         "Reading YouTube live chat messages"))
+    if not _VBOXAPI_OK:
+        missing.append(("vboxapi", "install the VirtualBox SDK for this Python",
+                         "Direct mouse/session control inside the VM"))
+    if not _WIN32COM_OK:
+        missing.append(("pywin32", "pip install pywin32",
+                         "Text-to-speech (SAPI voice)"))
+    if not _PLYER_OK:
+        missing.append(("plyer", "pip install plyer",
+                         "Windows toast notifications"))
+    if not _PYSTRAY_OK:
+        missing.append(("pystray, pillow", "pip install pystray pillow",
+                         "System tray icon"))
+    if not _PYAUTOGUI_OK:
+        missing.append(("pyautogui", "pip install pyautogui",
+                         "Real PC Control tab (mouse/keyboard automation)"))
+
+    if not missing:
+        return
+
+    lines = ["Some optional libraries are missing. The app will keep running,",
+             "but the features listed below will be unavailable until you",
+             "install them.\n"]
+    for name, how, feature in missing:
+        lines.append(f"• {name}  —  disables: {feature}")
+        lines.append(f"    install: {how}\n")
+    lines.append("You can install everything at once with:")
+    lines.append("    pip install pytchat pywin32 plyer pystray pillow pyautogui")
+
+    message = "\n".join(lines)
+    print("[Startup] Missing libraries:\n" + message)
+
+    try:
+        import ctypes
+        MB_ICONWARNING = 0x30
+        ctypes.windll.user32.MessageBoxW(
+            0, message, "Missing Optional Libraries", MB_ICONWARNING
+        )
+    except Exception as e:
+        print(f"[Startup] Could not show missing-library dialog: {e}")
+
+
 if __name__ == '__main__':
     load_custom_commands()
     load_user_mgmt()
@@ -7329,12 +7812,17 @@ if __name__ == '__main__':
     # Never call tk.Tk() a second time — that would reset all ttk styles.
     root = _host_root
     _gui_root = root
-    app  = UltraBotGUI(root)   # builds GUI while root is still hidden
+    app  = NexovativeControlCenter(root)   # builds GUI while root is still hidden
 
     _update_splash(100, "Ready!")
     time.sleep(0.25)    # let the user see 100% for a moment
+    _play_splash_outro_animation()   # animated "NEXOVATIVE" reveal
     _close_splash()     # destroy splash Toplevel
     root.deiconify()    # NOW show the fully-built main window
+    root.lift()
+    root.focus_force()
+
+    _report_missing_libraries()   # inform the user of any disabled features, non-blocking
 
     app.show_welcome_guide()   # show user guide on first launch
 
