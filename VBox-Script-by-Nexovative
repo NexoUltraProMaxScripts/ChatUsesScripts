@@ -44,7 +44,7 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & AUTO-UPDATE =========================
-VERSION = "30.0.0"   # increment this with every release
+VERSION = "30.1.0"   # increment this with every release
 
 # Replace these two URLs with your own GitHub repo paths.
 # GITHUB_VERSION_URL  → raw URL of version.json in your repo
@@ -206,6 +206,89 @@ _splash_title_label = None
 _splash_by_label = None
 _splash_bar_bg = None
 _host_root     = None   # the one-and-only tk.Tk() instance (kept hidden during splash)
+APP_LITE_MODE  = False  # True = Lite Mode (fewer widgets, slower polling, for weaker PCs)
+
+def _ask_startup_mode():
+    """
+    Shown once, right after the hidden host root is created and before the
+    splash screen appears. Lets the user pick between Full GUI Mode and
+    Lite Mode (fewer widgets built up front, slower background refresh
+    intervals) for weaker computers. Returns nothing — sets the global
+    APP_LITE_MODE flag directly.
+    """
+    global APP_LITE_MODE
+
+    dlg = tk.Toplevel(_host_root)
+    dlg.title("")
+    dlg.resizable(False, False)
+    dlg.overrideredirect(True)
+    W, H = 460, 260
+    sw = dlg.winfo_screenwidth()
+    sh = dlg.winfo_screenheight()
+    x  = (sw - W) // 2
+    y  = (sh - H) // 2
+    dlg.geometry(f"{W}x{H}+{x}+{y}")
+    dlg.configure(bg="#0f0f1a")
+
+    border = tk.Frame(dlg, bg="#7c5cbf", padx=2, pady=2)
+    border.place(relx=0, rely=0, relwidth=1, relheight=1)
+    inner = tk.Frame(border, bg="#0f0f1a")
+    inner.pack(fill="both", expand=True)
+
+    tk.Label(inner, text="Choose Startup Mode",
+             bg="#0f0f1a", fg="#ffffff",
+             font=("Segoe UI", 15, "bold")).pack(pady=(22, 4))
+
+    tk.Label(inner,
+             text="Pick Lite Mode if your computer is older or slower.\n"
+                  "You can't switch modes without restarting the app.",
+             bg="#0f0f1a", fg="#aaaaaa",
+             font=("Segoe UI", 9), justify="center").pack(pady=(0, 18))
+
+    result = {"lite": False}
+
+    def _choose(lite: bool):
+        result["lite"] = lite
+        dlg.destroy()
+
+    btn_row = tk.Frame(inner, bg="#0f0f1a")
+    btn_row.pack(pady=(0, 10))
+
+    full_btn = tk.Button(
+        btn_row, text="🖥  Full GUI Mode\n(all features, more RAM/CPU)",
+        bg="#7c5cbf", fg="#ffffff", activebackground="#a684e8",
+        activeforeground="#ffffff", relief="flat", bd=0,
+        font=("Segoe UI", 9, "bold"), justify="center",
+        width=22, height=3, cursor="hand2",
+        command=lambda: _choose(False),
+    )
+    full_btn.pack(side="left", padx=(0, 8))
+
+    lite_btn = tk.Button(
+        btn_row, text="🪶  Lite Mode\n(fewer widgets, lower usage)",
+        bg="#1e1e2e", fg="#3ddc97", activebackground="#2a2a3e",
+        activeforeground="#3ddc97", relief="flat", bd=0,
+        font=("Segoe UI", 9, "bold"), justify="center",
+        width=22, height=3, cursor="hand2",
+        command=lambda: _choose(True),
+    )
+    lite_btn.pack(side="left")
+
+    tk.Label(inner, text="Script by Nexovative",
+             bg="#0f0f1a", fg="#f0c060",
+             font=("Segoe UI", 8, "bold")).pack(side="bottom", pady=(0, 10))
+
+    dlg.lift()
+    dlg.attributes("-topmost", True)
+    dlg.focus_force()
+    dlg.update()
+
+    # Block here (small local event loop) until the user picks one.
+    dlg.wait_window(dlg)
+
+    APP_LITE_MODE = result["lite"]
+    print(f"[Startup] Mode selected: {'LITE' if APP_LITE_MODE else 'FULL GUI'}")
+
 
 def _create_splash():
     global _splash_root, _splash_bar, _splash_label, _splash_pct, _host_root
@@ -215,6 +298,8 @@ def _create_splash():
     # All ttk styles will be registered on this interpreter.
     _host_root = tk.Tk()
     _host_root.withdraw()
+
+    _ask_startup_mode()   # user picks Full GUI vs Lite Mode before anything else loads
 
     W, H = 480, 220
     # Splash is a Toplevel so it shares the same Tk interpreter
@@ -3335,9 +3420,8 @@ class NexovativeControlCenter:
         load_sound_config()
         load_multi_stream_config()
         load_scheduler_config()
-        self._build_ui()
         load_custom_commands()
-        self._refresh_cmd_list()
+        self._build_ui()
 
     # ── TTK Styles ──
     def _make_context_menu(self, widget, is_text=False):
@@ -3567,36 +3651,155 @@ class NexovativeControlCenter:
         nb.add(tab14, text="🖱 Real PC")
         nb.add(tab15, text="🔄 Reconnect")
 
-        self._build_main_tab(tab1)
-        self._build_cmd_builder_tab(tab2)
-        self._build_vm_controls_tab(tab3)
-        self._build_os_voting_tab(tab4)
-        self._build_appearance_tab(tab5)
-        self._build_obs_tab(tab6)
-        self._build_statistics_tab(tab7)
-        self._build_user_mgmt_tab(tab8)
-        self._build_event_log_tab(tab9)
-        self._build_permissions_tab(tab10)
-        self._build_sound_tts_tab(tab11)
-        self._build_multi_stream_tab(tab12)
-        self._build_scheduler_tab(tab13)
-        self._build_realpc_tab(tab14)
-        self._build_reconnect_tab(tab15)
+        if not APP_LITE_MODE:
+            # ── Full GUI Mode: build every tab immediately, as before. ──
+            self._build_main_tab(tab1)
+            self._build_cmd_builder_tab(tab2)
+            self._build_vm_controls_tab(tab3)
+            self._build_os_voting_tab(tab4)
+            self._build_appearance_tab(tab5)
+            self._build_obs_tab(tab6)
+            self._build_statistics_tab(tab7)
+            self._build_user_mgmt_tab(tab8)
+            self._build_event_log_tab(tab9)
+            self._build_permissions_tab(tab10)
+            self._build_sound_tts_tab(tab11)
+            self._build_multi_stream_tab(tab12)
+            self._build_scheduler_tab(tab13)
+            self._build_realpc_tab(tab14)
+            self._build_reconnect_tab(tab15)
+        else:
+            # ── Lite Mode: ULTRA — only the tab currently being viewed is
+            # ever built. Main, VM controls, and Real PC stay built (they're
+            # needed for the bot to actually run), but every other tab is
+            # destroyed the moment you leave it and rebuilt from scratch the
+            # next time you open it. This keeps memory/CPU usage down to
+            # "one extra tab's worth" at any given moment, instead of
+            # accumulating every tab you've ever visited.
+            self._build_main_tab(tab1)
+            self._build_vm_controls_tab(tab3)
+            self._build_realpc_tab(tab14)
+
+            self._lazy_tab_builders = {
+                tab2:  self._build_cmd_builder_tab,
+                tab4:  self._build_os_voting_tab,
+                tab5:  self._build_appearance_tab,
+                tab6:  self._build_obs_tab,
+                tab7:  self._build_statistics_tab,
+                tab8:  self._build_user_mgmt_tab,
+                tab9:  self._build_event_log_tab,
+                tab10: self._build_permissions_tab,
+                tab11: self._build_sound_tts_tab,
+                tab12: self._build_multi_stream_tab,
+                tab13: self._build_scheduler_tab,
+                tab15: self._build_reconnect_tab,
+            }
+            # Maps tab index -> the frame's own "unsaved changes" save
+            # function, so we can offer to save before tearing a tab down.
+            self._lazy_tab_save_fns = {
+                1:  self._save_cmd,
+                3:  self._save_os_voting_config,
+                5:  self._obs_save,
+                9:  self._save_permissions,
+                10: self._save_sound_config,
+                11: self._ms_save,
+                12: self._sched_save,
+                14: self._save_reconnect_config,
+            }
+            self._lazy_tab_currently_built = None   # the one lazy frame that's live right now
+
+            def _show_loading_placeholder(frame):
+                tk.Label(frame, text="Loading…", bg=self.BG,
+                         fg=self.TEXTDIM, font=("Segoe UI", 10)).pack(pady=40)
+
+            for frame in list(self._lazy_tab_builders.keys()):
+                _show_loading_placeholder(frame)
+
+            def _teardown_lazy_tab(frame):
+                """Destroy a lazy tab's real widgets and put the placeholder back."""
+                for child in frame.winfo_children():
+                    child.destroy()
+                _show_loading_placeholder(frame)
+
+            def _build_tab_on_first_view(event):
+                try:
+                    current = nb.nametowidget(nb.select())
+                except Exception:
+                    return
+
+                # Tear down whichever lazy tab was previously active (if any,
+                # and if it isn't the one we're switching to).
+                prev = self._lazy_tab_currently_built
+                if prev is not None and prev is not current:
+                    prev_idx = None
+                    try:
+                        prev_idx = nb.index(prev)
+                    except Exception:
+                        pass
+                    # Offer to save unsaved changes before destroying the tab —
+                    # once destroyed, any typed-but-unsaved data is gone for good.
+                    if prev_idx is not None and prev_idx in self._unsaved_tabs:
+                        tab_name = nb.tab(prev_idx, "text")
+                        answer = messagebox.askyesno(
+                            "Unsaved Changes",
+                            f"The tab  \"{tab_name}\"  has unsaved changes.\n\n"
+                            "Save before closing this tab? (Lite Mode unloads "
+                            "tabs you're not viewing to save memory — unsaved "
+                            "data will be lost otherwise.)"
+                        )
+                        if answer:
+                            save_fn = self._lazy_tab_save_fns.get(prev_idx)
+                            if save_fn:
+                                try:
+                                    save_fn()
+                                except Exception:
+                                    pass
+                        self._unsaved_tabs.discard(prev_idx)
+                    _teardown_lazy_tab(prev)
+                    self._lazy_tab_built.discard(prev)
+                    self._lazy_tab_currently_built = None
+
+                # Build the newly-selected lazy tab, if it is one and isn't
+                # already built (it never should be at this point, but the
+                # check is cheap insurance).
+                if current in self._lazy_tab_builders and current not in self._lazy_tab_built:
+                    builder = self._lazy_tab_builders[current]
+                    for child in current.winfo_children():
+                        child.destroy()   # remove the "Loading…" placeholder
+                    builder(current)
+                    self._lazy_tab_built.add(current)
+                    self._lazy_tab_currently_built = current
+                elif current in self._lazy_tab_builders:
+                    self._lazy_tab_currently_built = current
+
+            self._lazy_tab_built = set()
+            nb.bind("<<NotebookTabChanged>>", _build_tab_on_first_view, add="+")
         self._sync_main_vm_lock()
         self._nb = nb   # store reference for unsaved-changes guard
         self._bind_context_menus()   # attach right-click menus to all Entry/Text widgets
         self._stats_update_job = None
-        self.root.after(1000, self._refresh_stats_display)
+        self.root.after(5000 if APP_LITE_MODE else 1000, self._refresh_stats_display)
 
         # ── Unsaved-changes guard: intercept tab switches ──
         # Tab indices that can have unsaved state (matched by name text prefix):
         # 1=Commands, 3=OS Voting, 5=OBS, 9=Permissions, 10=Sound&TTS,
         # 11=Multi-Stream, 12=Scheduler, 13=Real PC, 14=Reconnect
+        # NOTE: in Lite Mode, indices 1,3,5,9,10,11,12,14 are lazy tabs whose
+        # unsaved-changes check + save-prompt is already handled by
+        # _build_tab_on_first_view right before it tears the tab down. Only
+        # index 13 (Real PC) is always eagerly built, so it's the only one
+        # this guard still needs to handle when Lite Mode is on.
+        _lazy_guarded_indices = {1, 3, 5, 9, 10, 11, 12, 14}
+
         def _on_tab_changed(event):
             try:
                 new_idx = nb.index(nb.select())
                 old_idx = self._current_tab
                 if new_idx == old_idx:
+                    return
+                if APP_LITE_MODE and old_idx in _lazy_guarded_indices:
+                    # Already handled by the lazy-tab teardown logic above.
+                    self._current_tab = new_idx
                     return
                 if old_idx in self._unsaved_tabs:
                     tab_name = nb.tab(old_idx, "text")
@@ -3627,7 +3830,7 @@ class NexovativeControlCenter:
             except Exception:
                 pass
 
-        nb.bind("<<NotebookTabChanged>>", _on_tab_changed)
+        nb.bind("<<NotebookTabChanged>>", _on_tab_changed, add="+")
 
     # ──────────────── TAB 1 : MAIN ────────────────
     def _build_main_tab(self, parent):
@@ -4021,6 +4224,10 @@ class NexovativeControlCenter:
 
         # Track unsaved changes (tab index 1)
         self._trace_dirty(1, self._trig_var, self._chain_var, self._action_var, self._args_var)
+
+        # Populate the listbox now that it exists — works for both eager
+        # (Full GUI Mode) and lazy (Lite Mode, first-click) builds.
+        self._refresh_cmd_list()
 
     # ──────────────── TAB 3 : VM CONTROLS ────────────────
     def _build_vm_controls_tab(self, parent):
@@ -5313,6 +5520,15 @@ class NexovativeControlCenter:
                    command=self._reset_stats).pack(side="left")
 
     def _refresh_stats_display(self):
+        # In Lite Mode the Stats tab may not be built yet (lazy-loaded on
+        # first click). Skip all the widget updates until it exists, and
+        # check back less often so this loop doesn't burn CPU for nothing.
+        if not hasattr(self, "_stat_labels"):
+            try:
+                self._stats_update_job = self.root.after(10000, self._refresh_stats_display)
+            except Exception:
+                pass
+            return
         try:
             # Counter cards
             for key in ("session_commands", "total_commands", "os_switches", "restarts", "reverts"):
@@ -5358,7 +5574,8 @@ class NexovativeControlCenter:
             pass
         # Schedule next refresh
         try:
-            self._stats_update_job = self.root.after(2000, self._refresh_stats_display)
+            interval = 5000 if APP_LITE_MODE else 2000
+            self._stats_update_job = self.root.after(interval, self._refresh_stats_display)
         except Exception:
             pass
 
@@ -5539,7 +5756,7 @@ class NexovativeControlCenter:
             self._ban_tree.insert("", "end", values=(user, f"{m}m {s}s"), tags=(tag,))
         self._ban_tree.tag_configure("even", background=self.BG3)
         self._ban_tree.tag_configure("odd",  background=self.BG2)
-        self._ban_refresh_job = self.root.after(5000, self._refresh_ban_list)
+        self._ban_refresh_job = self.root.after(12000 if APP_LITE_MODE else 5000, self._refresh_ban_list)
 
     def _gui_ban_user(self):
         username = normalize_username(self._ban_user_var.get())
@@ -5853,7 +6070,7 @@ class NexovativeControlCenter:
             self._apply_elog_filter()
         except Exception:
             pass
-        self.root.after(3000, self._elog_auto_refresh)
+        self.root.after(8000 if APP_LITE_MODE else 3000, self._elog_auto_refresh)
 
     def _apply_elog_filter(self):
         type_f = self._elog_type_var.get()
@@ -7354,6 +7571,7 @@ class NexovativeControlCenter:
             ("🚀  Getting Started", [
                 ("h1",   "🚀  Getting Started"),
                 ("body", "Welcome to Nexovative Control Center! This guide explains every feature so you can hit the ground running."),
+                ("body", "You're running in Lite Mode — tabs other than Main, VM, and Real PC load the first time you click on them, and background refresh happens less often, to keep RAM/CPU usage lower on older computers." if APP_LITE_MODE else ""),
                 ("h2",   "First-time setup"),
                 ("body", "1.  Paste your YouTube Video ID into the Main tab."),
                 ("body", "    e.g. if your URL is  youtube.com/watch?v=abc123XYZ  →  enter  abc123XYZ"),
@@ -7686,6 +7904,8 @@ class NexovativeControlCenter:
             txt.configure(state="normal")
             txt.delete("1.0", "end")
             for tag, content in sections:
+                if not content:
+                    continue
                 txt.insert("end", content + "\n", tag)
             txt.configure(state="disabled")
             txt.yview_moveto(0)
@@ -7816,7 +8036,8 @@ if __name__ == '__main__':
 
     _update_splash(100, "Ready!")
     time.sleep(0.25)    # let the user see 100% for a moment
-    _play_splash_outro_animation()   # animated "NEXOVATIVE" reveal
+    if not APP_LITE_MODE:
+        _play_splash_outro_animation()   # animated "NEXOVATIVE" reveal (skipped in Lite Mode)
     _close_splash()     # destroy splash Toplevel
     root.deiconify()    # NOW show the fully-built main window
     root.lift()
