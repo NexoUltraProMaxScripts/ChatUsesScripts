@@ -43,82 +43,48 @@ if not _is_admin():
     )
     sys.exit(0)
 
-# ========================= VERSION & AUTO-UPDATE =========================
-VERSION = "30.1.0"   # increment this with every release
+# ========================= VERSION & UPDATE CHECK =========================
+VERSION = "30.2.0"   # increment this with every release
 
-# Replace these two URLs with your own GitHub repo paths.
-# GITHUB_VERSION_URL  → raw URL of version.json in your repo
-# GITHUB_SCRIPT_URL   → raw URL of the main script file in your repo
+# Raw URL of version.json in your repo, and the page to send users to
+# when a newer version is available.
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/NexoUltraProMaxScripts/ChatUsesScripts/refs/heads/main/version.json"
-GITHUB_SCRIPT_URL  = "https://raw.githubusercontent.com/NexoUltraProMaxScripts/ChatUsesScripts/refs/heads/main/VBox-Script-by-Nexovative"
-
-# Public key used to verify the signature of downloaded updates.
-# This is SAFE to keep here — it can only verify signatures, not create them.
-# Generate this pair locally with generate_keys.py and paste the public key below.
-UPDATE_PUBLIC_KEY_HEX = "93f1c0018ff6323ac5ccf45a304ae0d96750656b4c6cd469a98b5c21ed4977ed"
-
-
-def _verify_update_signature(file_bytes, expected_sha256_hex, signature_hex):
-    """
-    Verifies that file_bytes matches the expected SHA-256 hash, and that the
-    hash was signed by the holder of the private key matching
-    UPDATE_PUBLIC_KEY_HEX. Returns True only if both checks pass.
-    """
-    import hashlib
-    import binascii
-
-    try:
-        from nacl.signing import VerifyKey
-        from nacl.exceptions import BadSignatureError
-    except ImportError:
-        print("[Updater] PyNaCl is not installed; cannot verify update signature. Aborting update.")
-        return False
-
-    actual_hash = hashlib.sha256(file_bytes).hexdigest()
-    if actual_hash != expected_sha256_hex:
-        print("[Updater] Hash mismatch -- downloaded file does not match version.json. Rejecting update.")
-        return False
-
-    try:
-        verify_key = VerifyKey(binascii.unhexlify(UPDATE_PUBLIC_KEY_HEX))
-        verify_key.verify(expected_sha256_hex.encode("ascii"), binascii.unhexlify(signature_hex))
-        return True
-    except BadSignatureError:
-        print("[Updater] Signature is invalid. Rejecting update.")
-        return False
-    except Exception as e:
-        print(f"[Updater] Signature verification error: {e}. Rejecting update.")
-        return False
+GITHUB_REPO_PAGE_URL = "https://github.com/NexoUltraProMaxScripts/ChatUsesScripts"
 
 
 def _check_for_update():
     """
-    Downloads version.json from GitHub and compares it to the running version.
-    If a newer version is available, asks the user whether to update.
-    Called once during splash, before the main GUI is built.
-    Returns True if the script restarted (caller should exit), False otherwise.
+    Downloads version.json from GitHub and compares its "version" field to
+    the version running locally. If a newer version is available, asks the
+    user whether to open the GitHub repo page so they can download and
+    install the update themselves. Called once during splash, before the
+    main GUI is built.
     """
     import urllib.request
-    import urllib.error
     import json as _json
     import ctypes
+    import webbrowser
 
     MB_YESNO        = 0x04
     MB_ICONQUESTION = 0x20
-    MB_ICONERROR    = 0x10
     IDYES           = 6
 
     try:
         _update_splash(8, "Checking for updates...")
-        with urllib.request.urlopen(GITHUB_VERSION_URL, timeout=5) as resp:
-            data            = _json.loads(resp.read().decode("utf-8"))
-            latest_ver      = data.get("version", "0.0.0").strip()
-            expected_sha256 = data.get("sha256", "").strip()
-            signature_hex   = data.get("signature", "").strip()
+        req = urllib.request.Request(
+            GITHUB_VERSION_URL,
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data       = _json.loads(resp.read().decode("utf-8"))
+            latest_ver = data.get("version", "0.0.0").strip()
     except Exception as e:
         # Network unavailable or repo not configured — silently skip.
         print(f"[Updater] Could not check for updates: {e}")
-        return False
+        return
 
     def _ver_tuple(v):
         try:
@@ -128,69 +94,29 @@ def _check_for_update():
 
     if _ver_tuple(latest_ver) <= _ver_tuple(VERSION):
         print(f"[Updater] Up to date ({VERSION}).")
-        return False
+        return
 
-    if not expected_sha256 or not signature_hex:
-        print("[Updater] version.json is missing sha256/signature fields. Refusing to update.")
-        return False
-
-    # New version found — ask the user.
+    # New version found — ask the user whether to open the GitHub page.
     msg = (
         f"A new version is available!\n\n"
         f"  Current version : {VERSION}\n"
         f"  New version     : {latest_ver}\n\n"
-        f"Update now? The bot will restart automatically after downloading."
+        f"Open the GitHub page to download the update?"
     )
     answer = ctypes.windll.user32.MessageBoxW(
         0, msg, "Update Available", MB_YESNO | MB_ICONQUESTION
     )
-    if answer != IDYES:
-        print(f"[Updater] User declined update to {latest_ver}.")
-        return False
-
-    # Download new script to a temporary file first (atomic update).
-    _update_splash(9, f"Downloading version {latest_ver}...")
-    script_path = os.path.abspath(sys.argv[0])
-    tmp_path    = script_path + ".update_tmp"
-    try:
-        with urllib.request.urlopen(GITHUB_SCRIPT_URL, timeout=30) as resp:
-            new_code = resp.read()
-
-        _update_splash(9, "Verifying update signature...")
-        if not _verify_update_signature(new_code, expected_sha256, signature_hex):
-            ctypes.windll.user32.MessageBoxW(
-                0,
-                "Update rejected: the downloaded file failed signature verification.\n\n"
-                "This could mean the update source has been compromised.\n"
-                "The bot will start with the current version.",
-                "Update Security Warning",
-                MB_ICONERROR
-            )
-            print("[Updater] Update rejected due to failed signature verification.")
-            return False
-
-        with open(tmp_path, "wb") as f:
-            f.write(new_code)
-        # Atomic replace: rename tmp over the live file.
-        if os.path.exists(script_path):
-            os.replace(tmp_path, script_path)
-        print(f"[Updater] Updated to {latest_ver}. Restarting...")
-        # Restart the process with the same arguments.
-        subprocess.Popen([sys.executable, script_path] + sys.argv[1:])
+    if answer == IDYES:
+        print(f"[Updater] Opening GitHub page for version {latest_ver}. Exiting.")
+        webbrowser.open(GITHUB_REPO_PAGE_URL)
+        try:
+            if _host_root is not None:
+                _host_root.destroy()
+        except Exception:
+            pass
         sys.exit(0)
-    except Exception as e:
-        # Clean up temp file if something went wrong.
-        if os.path.exists(tmp_path):
-            try: os.remove(tmp_path)
-            except Exception: pass
-        ctypes.windll.user32.MessageBoxW(
-            0,
-            f"Update failed:\n{e}\n\nThe bot will start with the current version.",
-            "Update Error",
-            MB_ICONERROR
-        )
-        print(f"[Updater] Update failed: {e}")
-        return False
+    else:
+        print(f"[Updater] User declined to open the GitHub page for {latest_ver}.")
 
 
 # Show the splash immediately — before any heavy imports — so the user
@@ -205,6 +131,8 @@ _splash_brand_label = None
 _splash_title_label = None
 _splash_by_label = None
 _splash_bar_bg = None
+_splash_spinner_canvas = None   # Canvas holding the rotating dot spinner
+_splash_spinner_angle  = 0      # current rotation angle of the spinner, in degrees
 _host_root     = None   # the one-and-only tk.Tk() instance (kept hidden during splash)
 APP_LITE_MODE  = False  # True = Lite Mode (fewer widgets, slower polling, for weaker PCs)
 
@@ -293,6 +221,7 @@ def _ask_startup_mode():
 def _create_splash():
     global _splash_root, _splash_bar, _splash_label, _splash_pct, _host_root
     global _splash_inner, _splash_brand_label, _splash_title_label, _splash_by_label, _splash_bar_bg
+    global _splash_spinner_canvas, _splash_spinner_angle
 
     # Create the single tk.Tk() host window and keep it hidden.
     # All ttk styles will be registered on this interpreter.
@@ -301,7 +230,7 @@ def _create_splash():
 
     _ask_startup_mode()   # user picks Full GUI vs Lite Mode before anything else loads
 
-    W, H = 480, 220
+    W, H = 480, 240
     # Splash is a Toplevel so it shares the same Tk interpreter
     splash = tk.Toplevel(_host_root)
     splash.title("")
@@ -325,7 +254,7 @@ def _create_splash():
     _splash_by_label = tk.Label(inner, text="Script by Nexovative",
              bg="#0f0f1a", fg="#f0c060",
              font=("Segoe UI", 11, "bold"))
-    _splash_by_label.pack(pady=(22, 0))
+    _splash_by_label.pack(pady=(18, 0))
 
     # App title
     _splash_title_label = tk.Label(inner, text="Nexovative Control Center",
@@ -333,25 +262,33 @@ def _create_splash():
              font=("Segoe UI", 18, "bold"))
     _splash_title_label.pack(pady=(4, 0))
 
-    # Status label
-    _splash_label = tk.Label(inner, text="Loading GUI...",
-                              bg="#0f0f1a", fg="#aaaaaa",
+    # ── Windows 11-style rotating dot spinner ──
+    SPINNER_SIZE = 46
+    spinner = tk.Canvas(inner, width=SPINNER_SIZE, height=SPINNER_SIZE,
+                         bg="#0f0f1a", highlightthickness=0, bd=0)
+    spinner.pack(pady=(16, 10))
+    _splash_spinner_canvas = spinner
+    _splash_spinner_angle = 0
+    _draw_spinner(0)
+
+    # Status row: current library being imported, with percentage alongside
+    status_row = tk.Frame(inner, bg="#0f0f1a")
+    status_row.pack(pady=(0, 8))
+
+    _splash_label = tk.Label(status_row, text="Starting up...",
+                              bg="#0f0f1a", fg="#cccccc",
                               font=("Segoe UI", 9))
-    _splash_label.pack(pady=(14, 4))
+    _splash_label.pack(side="left")
 
-    # Progress bar container
-    bar_bg = tk.Frame(inner, bg="#1e1e2e", height=18, width=380)
-    bar_bg.pack(pady=(0, 8))
-    bar_bg.pack_propagate(False)
-    _splash_bar_bg = bar_bg
-
-    _splash_bar = tk.Frame(bar_bg, bg="#3ddc97", width=0, height=18)
-    _splash_bar.place(x=0, y=0, relheight=1)
-
-    _splash_pct = tk.Label(inner, text="0%",
+    _splash_pct = tk.Label(status_row, text="0%",
                             bg="#0f0f1a", fg="#3ddc97",
-                            font=("Segoe UI", 8))
-    _splash_pct.pack()
+                            font=("Segoe UI", 9, "bold"))
+    _splash_pct.pack(side="left", padx=(8, 0))
+
+    # Kept for compatibility with code that references these — unused now
+    # that the loading bar has been replaced by the spinner above.
+    _splash_bar_bg = None
+    _splash_bar    = None
 
     # Hidden until loading finishes — shows the animated "NEXOVATIVE" reveal.
     _splash_brand_label = tk.Label(inner, text="",
@@ -364,28 +301,146 @@ def _create_splash():
     # splash.attributes("-topmost", True)  # removed: caused splash to stay always on top
     splash.update()
 
+
+def _draw_spinner(angle):
+    """
+    Draws a Windows 11-style rotating dot ring on the spinner canvas at the
+    given rotation angle (degrees). Dots fade from bright to dim going
+    backwards around the ring, giving the same "chasing dots" look as the
+    Windows 11 boot/loading spinner.
+    """
+    import math
+
+    canvas = _splash_spinner_canvas
+    if canvas is None:
+        return
+    canvas.delete("spinner")
+
+    size = 46
+    cx, cy = size / 2, size / 2
+    radius = size / 2 - 5
+    dot_count = 8
+    base_color = (166, 132, 232)   # #a684e8, matches ACCENT2
+
+    for i in range(dot_count):
+        dot_angle = math.radians(angle + i * (360 / dot_count))
+        dx = cx + radius * math.cos(dot_angle)
+        dy = cy + radius * math.sin(dot_angle)
+
+        # Brightness fades around the ring so the ring reads as "spinning".
+        brightness = 1.0 - (i / dot_count) * 0.85
+        r = int(15 + (base_color[0] - 15) * brightness)
+        g = int(15 + (base_color[1] - 15) * brightness)
+        b = int(26 + (base_color[2] - 26) * brightness)
+        color = f"#{r:02x}{g:02x}{b:02x}"
+
+        dot_radius = 2.6 + 1.6 * brightness
+        canvas.create_oval(dx - dot_radius, dy - dot_radius,
+                            dx + dot_radius, dy + dot_radius,
+                            fill=color, outline="", tags="spinner")
+
+
+def _spin_splash(steps=10, step_degrees=12, delay=0.012):
+    """
+    Advances the spinner animation by a few frames. Called from
+    _update_splash so the spinner keeps moving every time loading
+    progress is reported, without needing a separate background thread.
+    """
+    global _splash_spinner_angle
+    if _splash_root is None or _splash_spinner_canvas is None:
+        return
+    try:
+        for _ in range(steps):
+            _splash_spinner_angle = (_splash_spinner_angle + step_degrees) % 360
+            _draw_spinner(_splash_spinner_angle)
+            _splash_root.update_idletasks()
+            _splash_root.update()
+            time.sleep(delay)
+    except Exception:
+        pass
+
+
 def _update_splash(pct, label=None):
-    """Update progress bar (0-100) and optional status text (call from main thread)."""
+    """
+    Update the spinner-based loading screen (call from main thread).
+    `label` is shown as the current step / library being imported, and
+    `pct` is shown alongside it as a percentage. Also spins the dot
+    ring forward a few frames so it animates continuously as loading
+    progresses.
+    """
     if _splash_root is None:
         return
     try:
-        bar_width = int(380 * pct / 100)
-        _splash_bar.place(x=0, y=0, relheight=1, width=bar_width)
         _splash_pct.configure(text=f"{pct}%")
         if label:
             _splash_label.configure(text=label)
-        _splash_root.update()
+        _spin_splash()
     except Exception:
         pass
+
+def _play_chime(note_freqs, note_duration=0.12, sample_rate=44100, volume=0.25):
+    """
+    Synthesizes a short chime as PCM audio (a quick arpeggio of sine-wave
+    notes with a soft fade-out on each note to avoid clicking) and plays it
+    asynchronously via the built-in winsound module. No external files or
+    audio libraries are required. Silently does nothing on non-Windows
+    platforms or if anything about audio playback fails.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import winsound
+        import struct
+        import math as _math
+        import tempfile
+
+        samples = []
+        for freq in note_freqs:
+            n = int(sample_rate * note_duration)
+            for i in range(n):
+                t = i / sample_rate
+                # Soft fade-out over the note's tail avoids an audible click.
+                fade = 1.0 if i < n * 0.7 else max(0.0, 1.0 - (i - n * 0.7) / (n * 0.3))
+                sample = _math.sin(2 * _math.pi * freq * t) * volume * fade
+                samples.append(int(sample * 32767))
+
+        pcm_data = struct.pack("<" + "h" * len(samples), *samples)
+
+        num_channels = 1
+        bits_per_sample = 16
+        byte_rate = sample_rate * num_channels * bits_per_sample // 8
+        block_align = num_channels * bits_per_sample // 8
+        data_size = len(pcm_data)
+
+        wav_header = struct.pack(
+            "<4sI4s4sIHHIIHH4sI",
+            b"RIFF", 36 + data_size, b"WAVE",
+            b"fmt ", 16, 1, num_channels, sample_rate,
+            byte_rate, block_align, bits_per_sample,
+            b"data", data_size,
+        )
+
+        tmp_path = os.path.join(
+            tempfile.gettempdir(),
+            f"_nexovative_chime_{int(time.time() * 1000) % 1000000}.wav"
+        )
+        with open(tmp_path, "wb") as f:
+            f.write(wav_header + pcm_data)
+
+        winsound.PlaySound(tmp_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+    except Exception as e:
+        print(f"[Splash] Could not play chime: {e}")
+
 
 def _play_splash_outro_animation():
     """
     Called once loading reaches 100%. Hides the progress bar / status text
-    and plays a typewriter-style reveal of "NEXOVATIVE" with a color sweep,
-    then a hold, before the splash is destroyed and the main window is
-    shown. Fully synchronous (uses time.sleep + root.update) so it fits
-    into the existing linear startup sequence without needing Tk's event
-    loop to already be running.
+    and plays a modern Canvas-based reveal of "NEXOVATIVE": each letter
+    slides up and fades in with a staggered ease-out, an animated glow
+    line sweeps in underneath, then the whole wordmark pulses through a
+    gradient before a soft hold and close. Fully synchronous (uses
+    time.sleep + root.update) so it fits into the existing linear startup
+    sequence without needing Tk's event loop to already be running.
     """
     global _splash_root, _splash_label, _splash_bar_bg, _splash_pct
     global _splash_title_label, _splash_by_label, _splash_brand_label
@@ -409,37 +464,201 @@ def _play_splash_outro_animation():
         _splash_root.update()
 
         # Hide the loading-specific widgets — this is a reveal moment now.
-        for w in (_splash_label, _splash_bar_bg, _splash_pct,
-                  _splash_title_label, _splash_by_label):
+        for w in (_splash_label, _splash_pct, _splash_bar_bg,
+                  _splash_title_label, _splash_by_label, _splash_brand_label,
+                  _splash_spinner_canvas):
             if w is not None:
                 w.pack_forget()
+        # The spinner's percentage/status labels live inside a small
+        # container frame (status_row) that isn't tracked by any global —
+        # walk the splash tree and hide any leftover children so nothing
+        # from the loading screen lingers on top of the reveal.
+        for child in _splash_inner.winfo_children():
+            if child not in (_splash_brand_label,):
+                child.pack_forget()
 
-        _splash_brand_label.configure(text="", fg="#7c5cbf")
-        _splash_brand_label.pack(pady=(70, 0))
+        BG = "#0f0f1a"
+        word = "NEXOVATIVE"
+
+        canvas_w, canvas_h = 440, 130
+        canvas = tk.Canvas(_splash_inner, width=canvas_w, height=canvas_h,
+                            bg=BG, highlightthickness=0, bd=0)
+        canvas.pack(pady=(24, 0))
         _splash_root.update_idletasks()
         _splash_root.update()
-        time.sleep(0.15)   # tiny beat so the cleared layout is visible first
+        time.sleep(0.12)   # tiny beat so the cleared layout is visible first
 
-        word = "NEXOVATIVE"
-        # Typewriter reveal, letter by letter — slow enough to actually see.
-        for i in range(1, len(word) + 1):
-            _splash_brand_label.configure(text=word[:i])
+        import random
+        import math
+        random.seed()
+
+        font_name = ("Segoe UI", 26, "bold")
+        letter_gap = 30
+        total_width = letter_gap * (len(word) - 1)
+        start_x = canvas_w // 2 - total_width // 2
+        base_y = canvas_h // 2 + 4
+        rise = 22   # pixels each letter travels upward while fading in
+
+        def _ease_out_cubic(t):
+            return 1 - (1 - t) ** 3
+
+        def _lerp_color(c1, c2, t):
+            c1 = _splash_root.winfo_rgb(c1)
+            c2 = _splash_root.winfo_rgb(c2)
+            r = int(c1[0] + (c2[0] - c1[0]) * t) >> 8
+            g = int(c1[1] + (c2[1] - c1[1]) * t) >> 8
+            b = int(c1[2] + (c2[2] - c1[2]) * t) >> 8
+            return f"#{r:02x}{g:02x}{b:02x}"
+
+        # ── Background starfield: scattered dots that twinkle throughout ──
+        STAR_COUNT = 26
+        star_colors = ["#3d3d5c", "#4a4a6e", "#5a5a80", "#6b5ca0"]
+        stars = []
+        for _ in range(STAR_COUNT):
+            sx = random.randint(6, canvas_w - 6)
+            sy = random.randint(4, canvas_h - 4)
+            r  = random.uniform(0.8, 1.8)
+            item = canvas.create_oval(sx - r, sy - r, sx + r, sy + r,
+                                       fill=BG, outline="", tags="star")
+            stars.append({
+                "item": item, "color": random.choice(star_colors),
+                "phase": random.uniform(0, 6.28), "speed": random.uniform(0.12, 0.3),
+            })
+
+        def _twinkle_frame(t_elapsed):
+            """Fades each star in/out on its own sine cycle for a twinkle effect."""
+            for s in stars:
+                brightness = 0.5 + 0.5 * math.sin(t_elapsed * s["speed"] * 10 + s["phase"])
+                brightness = max(0.0, brightness)
+                color = _lerp_color(BG, s["color"], brightness)
+                canvas.itemconfigure(s["item"], fill=color)
+
+        # Fade the starfield in first, on its own, before the wordmark appears.
+        _play_chime([523.25, 659.25], note_duration=0.18, volume=0.15)   # soft C5-E5 shimmer
+        STAR_FADE_STEPS = 16
+        for step in range(1, STAR_FADE_STEPS + 1):
+            _twinkle_frame(step * 0.05)
             _splash_root.update_idletasks()
             _splash_root.update()
-            time.sleep(0.11)
+            time.sleep(0.02)
 
-        time.sleep(0.25)
+        elapsed = STAR_FADE_STEPS * 0.05
 
-        # Color sweep across a small palette for a "shine" pulse.
-        pulse_colors = ["#3ddc97", "#a684e8", "#f0c060", "#a684e8", "#7c5cbf"]
-        for color in pulse_colors:
-            _splash_brand_label.configure(fg=color)
+        # ── Phase 1: staggered slide-up + fade-in reveal, letter by letter ──
+        letter_ids = []
+        STEPS = 8
+        for i, ch in enumerate(word):
+            x = start_x + i * letter_gap
+            item = canvas.create_text(x, base_y + rise, text=ch,
+                                       font=font_name, fill=BG, anchor="center")
+            letter_ids.append(item)
+
+            for step in range(1, STEPS + 1):
+                t = _ease_out_cubic(step / STEPS)
+                y = (base_y + rise) - rise * t
+                color = _lerp_color(BG, "#a684e8", t)
+                canvas.coords(item, x, y)
+                canvas.itemconfigure(item, fill=color)
+                elapsed += 0.014
+                _twinkle_frame(elapsed)
+                canvas.tag_raise(item)
+                _splash_root.update_idletasks()
+                _splash_root.update()
+                time.sleep(0.014)
+
+            canvas.itemconfigure(item, fill="#a684e8")
+            elapsed += 0.08
+            _twinkle_frame(elapsed)
             _splash_root.update_idletasks()
             _splash_root.update()
-            time.sleep(0.16)
+            time.sleep(0.08)   # stagger before the next letter starts
 
-        # Hold on the finished word for a beat before closing.
-        time.sleep(0.6)
+        # ── Phase 2: animated glow underline sweeps in beneath the wordmark ──
+        _play_chime([392.00, 523.25, 659.25], note_duration=0.1, volume=0.2)   # G4-C5-E5 rise
+        line_y = base_y + 34
+        glow = canvas.create_line(start_x, line_y, start_x, line_y,
+                                   fill="#3ddc97", width=2, capstyle="round")
+        end_x = start_x + total_width + 14
+        SWEEP_STEPS = 18
+        for step in range(1, SWEEP_STEPS + 1):
+            t = _ease_out_cubic(step / SWEEP_STEPS)
+            x2 = (start_x - 14) + (end_x - (start_x - 14)) * t
+            canvas.coords(glow, start_x - 14, line_y, x2, line_y)
+            elapsed += 0.02
+            _twinkle_frame(elapsed)
+            _splash_root.update_idletasks()
+            _splash_root.update()
+            time.sleep(0.02)
+
+        for _ in range(14):
+            elapsed += 0.02
+            _twinkle_frame(elapsed)
+            _splash_root.update_idletasks()
+            _splash_root.update()
+            time.sleep(0.02)
+
+        # ── Phase 3: gradient color pulse across the full wordmark ──
+        pulse_colors = ["#a684e8", "#3ddc97", "#f0c060", "#7c5cbf", "#a684e8"]
+        PULSE_STEPS = 9
+        for c_from, c_to in zip(pulse_colors, pulse_colors[1:]):
+            for step in range(1, PULSE_STEPS + 1):
+                t = step / PULSE_STEPS
+                color = _lerp_color(c_from, c_to, t)
+                for item in letter_ids:
+                    canvas.itemconfigure(item, fill=color)
+                canvas.itemconfigure(glow, fill=color)
+                elapsed += 0.026
+                _twinkle_frame(elapsed)
+                _splash_root.update_idletasks()
+                _splash_root.update()
+                time.sleep(0.026)
+
+        # ── Phase 4: sparkle burst — small stars flare bright and scatter
+        # outward from the wordmark, then fade, like a shower of light ──
+        _play_chime([659.25, 830.61, 987.77], note_duration=0.09, volume=0.22)   # E5-G#5-B5 sparkle
+        burst_cx = start_x + total_width / 2
+        burst_cy = base_y - 6
+        SPARK_COUNT = 18
+        sparks = []
+        for _ in range(SPARK_COUNT):
+            ang = random.uniform(0, 6.28318)
+            dist = random.uniform(30, 95)
+            tx = burst_cx + math.cos(ang) * dist
+            ty = burst_cy + math.sin(ang) * dist * 0.6
+            color = random.choice(["#a684e8", "#3ddc97", "#f0c060", "#ffffff"])
+            item = canvas.create_oval(burst_cx - 1.5, burst_cy - 1.5,
+                                       burst_cx + 1.5, burst_cy + 1.5,
+                                       fill=color, outline="", tags="spark")
+            sparks.append({"item": item, "tx": tx, "ty": ty, "color": color})
+
+        BURST_STEPS = 16
+        for step in range(1, BURST_STEPS + 1):
+            t = _ease_out_cubic(step / BURST_STEPS)
+            fade = 1.0 - (step / BURST_STEPS) ** 2   # sparks dim as they travel out
+            for sp in sparks:
+                sx = burst_cx + (sp["tx"] - burst_cx) * t
+                sy = burst_cy + (sp["ty"] - burst_cy) * t
+                sz = 1.5 * fade + 0.3
+                col = _lerp_color(BG, sp["color"], max(0.0, fade))
+                canvas.coords(sp["item"], sx - sz, sy - sz, sx + sz, sy + sz)
+                canvas.itemconfigure(sp["item"], fill=col)
+            elapsed += 0.02
+            _twinkle_frame(elapsed)
+            _splash_root.update_idletasks()
+            _splash_root.update()
+            time.sleep(0.02)
+
+        # Settle back to the accent color and hold on the finished word.
+        for item in letter_ids:
+            canvas.itemconfigure(item, fill="#a684e8")
+        canvas.itemconfigure(glow, fill="#a684e8")
+        for _ in range(20):
+            elapsed += 0.035
+            _twinkle_frame(elapsed)
+            _splash_root.update_idletasks()
+            _splash_root.update()
+            time.sleep(0.035)
+
         try:
             _splash_root.attributes("-topmost", False)
         except Exception:
@@ -462,7 +681,7 @@ def _close_splash():
 # ── Show splash immediately ──
 _create_splash()
 _update_splash(5, "Loading GUI...")
-_check_for_update()   # checks GitHub, asks user if update available, restarts if accepted
+_check_for_update()   # checks GitHub, offers to open the repo page if a newer version exists
 
 # ========================= HEAVY IMPORTS =========================
 # These run AFTER the splash is visible.
@@ -539,6 +758,15 @@ except ImportError:
     _PYAUTOGUI_OK = False
     print("[RealPC] pyautogui not installed — Real PC Control tab will show install prompt. "
           "Run: pip install pyautogui")
+
+try:
+    import pygame
+    _PYGAME_OK = True
+except ImportError:
+    pygame     = None
+    _PYGAME_OK = False
+    print("[Music] pygame not installed — background music player will be disabled. "
+          "Run: pip install pygame")
 
 _update_splash(80, "Initializing VirtualBox manager...")
 
@@ -3369,6 +3597,179 @@ class ConsoleRedirect:
         sys.stderr = self._orig_stderr
 
 
+# ========================= BACKGROUND MUSIC PLAYER =========================
+MUSIC_DIR = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "music")
+MUSIC_EXTENSIONS = (".mp3", ".wav", ".ogg")
+
+
+class MusicPlayer:
+    """
+    Plays audio files from the local `music` folder in order, one after
+    another. Exposes next/previous track controls, play/pause toggling,
+    and volume control, plus a callback that fires whenever the currently
+    playing track changes, so the GUI can update the "now playing" label
+    in the title bar.
+    """
+
+    DEFAULT_VOLUME = 0.5   # 0.0 (silent) to 1.0 (full volume)
+
+    def __init__(self, music_dir=MUSIC_DIR, on_track_change=None):
+        self.music_dir = music_dir
+        self.on_track_change = on_track_change   # callback(track_name_or_None)
+        self.tracks = []
+        self.current_index = -1
+        self._enabled = _PYGAME_OK
+        self._paused = False
+        self._volume = self.DEFAULT_VOLUME
+        self._watcher_thread = None
+        self._stop_watcher = _threading_module.Event()
+
+        if self._enabled:
+            try:
+                pygame.mixer.init()
+                pygame.mixer.music.set_volume(self._volume)
+            except Exception as e:
+                print(f"[Music] Could not initialize audio mixer: {e}")
+                self._enabled = False
+
+        self._refresh_track_list()
+
+    def is_enabled(self):
+        return self._enabled
+
+    def is_paused(self):
+        return self._paused
+
+    def _refresh_track_list(self):
+        """Scans the music folder and rebuilds the sorted track list."""
+        try:
+            os.makedirs(self.music_dir, exist_ok=True)
+        except Exception as e:
+            print(f"[Music] Could not create music folder: {e}")
+
+        try:
+            files = [
+                f for f in os.listdir(self.music_dir)
+                if f.lower().endswith(MUSIC_EXTENSIONS)
+            ]
+            files.sort(key=str.lower)
+        except Exception as e:
+            print(f"[Music] Could not read music folder: {e}")
+            files = []
+
+        self.tracks = files
+
+    def has_tracks(self):
+        return len(self.tracks) > 0
+
+    def _notify_track_change(self):
+        if self.on_track_change:
+            name = self.current_track_name()
+            try:
+                self.on_track_change(name)
+            except Exception:
+                pass
+
+    def current_track_name(self):
+        if 0 <= self.current_index < len(self.tracks):
+            return self.tracks[self.current_index]
+        return None
+
+    def _play_index(self, index):
+        if not self._enabled or not self.tracks:
+            return
+        index = index % len(self.tracks)
+        self.current_index = index
+        track_path = os.path.join(self.music_dir, self.tracks[index])
+        try:
+            pygame.mixer.music.load(track_path)
+            pygame.mixer.music.play()
+            self._paused = False
+        except Exception as e:
+            print(f"[Music] Could not play '{self.tracks[index]}': {e}")
+        self._notify_track_change()
+
+    def start(self):
+        """Starts sequential playback from the first track, if any exist."""
+        self._refresh_track_list()
+        if not self._enabled:
+            return
+        if not self.tracks:
+            self._notify_track_change()
+            return
+        self._play_index(0)
+        self._start_watcher()
+
+    def next_track(self):
+        if not self._enabled or not self.tracks:
+            return
+        self._play_index(self.current_index + 1)
+
+    def previous_track(self):
+        if not self._enabled or not self.tracks:
+            return
+        self._play_index(self.current_index - 1)
+
+    def toggle_pause(self):
+        """Pauses playback if currently playing, or resumes if paused."""
+        if not self._enabled or not self.tracks:
+            return
+        try:
+            if self._paused:
+                pygame.mixer.music.unpause()
+                self._paused = False
+            else:
+                pygame.mixer.music.pause()
+                self._paused = True
+        except Exception as e:
+            print(f"[Music] Could not toggle pause: {e}")
+
+    def set_volume(self, volume):
+        """Sets playback volume. volume must be between 0.0 and 1.0."""
+        self._volume = max(0.0, min(1.0, volume))
+        if self._enabled:
+            try:
+                pygame.mixer.music.set_volume(self._volume)
+            except Exception as e:
+                print(f"[Music] Could not set volume: {e}")
+
+    def get_volume(self):
+        return self._volume
+
+    def stop(self):
+        self._stop_watcher.set()
+        if self._enabled:
+            try:
+                pygame.mixer.music.stop()
+            except Exception:
+                pass
+
+    def _start_watcher(self):
+        """
+        Background thread that watches for the current track ending, and
+        automatically advances to the next track in the folder. Skips the
+        check while playback is paused.
+        """
+        if self._watcher_thread and self._watcher_thread.is_alive():
+            return
+        self._stop_watcher.clear()
+
+        def _watch():
+            while not self._stop_watcher.is_set():
+                time.sleep(1)
+                if not self._enabled or self._paused:
+                    continue
+                try:
+                    busy = pygame.mixer.music.get_busy()
+                except Exception:
+                    busy = False
+                if not busy and self.tracks:
+                    self.next_track()
+
+        self._watcher_thread = _threading_module.Thread(target=_watch, daemon=True)
+        self._watcher_thread.start()
+
+
 # ========================= GUI =========================
 class NexovativeControlCenter:
     # ── Color palette ──
@@ -3400,6 +3801,8 @@ class NexovativeControlCenter:
         self._bot_running  = False
         self._bot_instance = None
         self._console_redir = None
+
+        self.music_player = MusicPlayer(on_track_change=self._on_music_track_change)
 
         # Edit state for Command Builder
         self._editing_cmd  = None   # trigger key being edited
@@ -3540,6 +3943,10 @@ class NexovativeControlCenter:
         style.configure("TScrollbar",
             background=self.BG3, troughcolor=self.BG,
             arrowcolor=self.ACCENT2, bordercolor=self.BG)
+        style.configure("TScale",
+            background=self.BG2, troughcolor=self.BG3,
+            bordercolor=self.BG2, lightcolor=self.ACCENT,
+            darkcolor=self.ACCENT)
 
     # ── Main UI ──
     def _build_ui(self):
@@ -3558,6 +3965,47 @@ class NexovativeControlCenter:
                    style="Dim.TButton",
                    command=lambda: self.show_welcome_guide(force=True)
                    ).pack(side="right", padx=(0, 4), pady=6)
+
+        # ── Background music controls ──
+        music_bar = tk.Frame(title_bar, bg=self.BG2)
+        music_bar.pack(side="right", padx=(0, 16))
+
+        tk.Button(music_bar, text="⏭", bg=self.BG3, fg=self.TEXT,
+                  activebackground=self.ACCENT, activeforeground="#fff",
+                  relief="flat", bd=0, font=("Segoe UI", 10, "bold"),
+                  width=3, cursor="hand2",
+                  command=self._music_next).pack(side="right", padx=(2, 0))
+
+        self._play_pause_btn = tk.Button(
+            music_bar, text="⏸", bg=self.BG3, fg=self.TEXT,
+            activebackground=self.ACCENT, activeforeground="#fff",
+            relief="flat", bd=0, font=("Segoe UI", 10, "bold"),
+            width=3, cursor="hand2",
+            command=self._music_toggle_pause)
+        self._play_pause_btn.pack(side="right", padx=(2, 0))
+
+        self._now_playing_label = tk.Label(
+            music_bar, text="🎵 No music loaded",
+            bg=self.BG2, fg=self.TEXTDIM,
+            font=("Segoe UI", 9), anchor="center")
+        self._now_playing_label.pack(side="right", padx=6)
+
+        tk.Button(music_bar, text="⏮", bg=self.BG3, fg=self.TEXT,
+                  activebackground=self.ACCENT, activeforeground="#fff",
+                  relief="flat", bd=0, font=("Segoe UI", 10, "bold"),
+                  width=3, cursor="hand2",
+                  command=self._music_previous).pack(side="right", padx=(0, 2))
+
+        tk.Label(music_bar, text="🔊", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9)).pack(side="right", padx=(6, 2))
+
+        self._volume_var = tk.DoubleVar(value=self.music_player.get_volume() * 100)
+        volume_slider = ttk.Scale(
+            music_bar, from_=0, to=100, orient="horizontal",
+            length=80, variable=self._volume_var,
+            command=self._music_volume_changed)
+        volume_slider.pack(side="right", padx=(0, 2))
+
 
         # ── Scrollable tab bar wrapper ──
         # The ttk.Notebook tab strip doesn't scroll natively. We wrap it in a
@@ -7486,6 +7934,65 @@ class NexovativeControlCenter:
     # ──────────────── Welcome / User Guide ────────────────
     GUIDE_FLAG_FILE = "guide_seen.flag"
 
+    # ── Background music ──
+    def _on_music_track_change(self, track_name):
+        """Called by MusicPlayer whenever the playing track changes."""
+        MAX_LABEL_CHARS = 40
+        def _update():
+            if track_name:
+                display = os.path.splitext(track_name)[0]
+                if len(display) > MAX_LABEL_CHARS:
+                    display = display[:MAX_LABEL_CHARS - 1] + "…"
+                self._now_playing_label.configure(
+                    text=f"🎵 {display}", fg=self.TEXT)
+                self._play_pause_btn.configure(text="⏸")
+            else:
+                self._now_playing_label.configure(
+                    text="🎵 No music loaded", fg=self.TEXTDIM)
+        try:
+            self.root.after(0, _update)
+        except Exception:
+            pass
+
+    def _music_next(self):
+        self.music_player.next_track()
+
+    def _music_previous(self):
+        self.music_player.previous_track()
+
+    def _music_toggle_pause(self):
+        self.music_player.toggle_pause()
+        if self.music_player.is_paused():
+            self._play_pause_btn.configure(text="▶")
+        else:
+            self._play_pause_btn.configure(text="⏸")
+
+    def _music_volume_changed(self, value):
+        self.music_player.set_volume(float(value) / 100)
+
+    def start_background_music(self):
+        """
+        Starts the background music player. If pygame is unavailable, this
+        is silently skipped (already reported in the missing-libraries
+        summary). If the music folder is empty, the user is informed once
+        so they know where to drop their audio files.
+        """
+        if not self.music_player.is_enabled():
+            return
+
+        if not self.music_player.has_tracks():
+            messagebox.showinfo(
+                "Background Music",
+                "No music files were found.\n\n"
+                f"Add MP3, WAV, or OGG files to this folder to enable "
+                f"background music:\n\n{MUSIC_DIR}\n\n"
+                "Tracks will play in order, and you can skip to the "
+                "next or previous track using the controls in the top bar."
+            )
+            return
+
+        self.music_player.start()
+
     def show_welcome_guide(self, force=False):
         if not force and os.path.exists(self.GUIDE_FLAG_FILE):
             return
@@ -7990,6 +8497,9 @@ def _report_missing_libraries():
     if not _PYAUTOGUI_OK:
         missing.append(("pyautogui", "pip install pyautogui",
                          "Real PC Control tab (mouse/keyboard automation)"))
+    if not _PYGAME_OK:
+        missing.append(("pygame", "pip install pygame",
+                         "Background music player"))
 
     if not missing:
         return
@@ -8047,6 +8557,8 @@ if __name__ == '__main__':
 
     app.show_welcome_guide()   # show user guide on first launch
 
+    app.start_background_music()   # start playing tracks from the music folder, if any
+
     start_tray_icon()
 
     def _on_close():
@@ -8071,6 +8583,7 @@ if __name__ == '__main__':
             bot_stop_event.set()
             stop_realpc_bot()
             stop_tray_icon()
+            app.music_player.stop()
             root.destroy()
             os._exit(0)
 
