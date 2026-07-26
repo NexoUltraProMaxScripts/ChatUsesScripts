@@ -44,7 +44,7 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & UPDATE CHECK =========================
-VERSION = "30.2.0"   # increment this with every release
+VERSION = "30.3.0"   # increment this with every release
 
 # Raw URL of version.json in your repo, and the page to send users to
 # when a newer version is available.
@@ -135,22 +135,73 @@ _splash_spinner_canvas = None   # Canvas holding the rotating dot spinner
 _splash_spinner_angle  = 0      # current rotation angle of the spinner, in degrees
 _host_root     = None   # the one-and-only tk.Tk() instance (kept hidden during splash)
 APP_LITE_MODE  = False  # True = Lite Mode (fewer widgets, slower polling, for weaker PCs)
+APP_EXTENDED_INTRO = False   # True = play the ~8s full-screen intro animation instead of the short one
+
+STARTUP_PREFS_FILE = "startup_prefs.json"
+
+
+def _load_startup_prefs():
+    """Reads small startup-screen preferences (currently just the extended-intro checkbox)."""
+    try:
+        if os.path.exists(STARTUP_PREFS_FILE):
+            import json as _json
+            with open(STARTUP_PREFS_FILE, "r", encoding="utf-8") as f:
+                return _json.load(f)
+    except Exception as e:
+        print(f"[Startup] Could not read {STARTUP_PREFS_FILE}: {e}")
+    return {}
+
+
+def _save_startup_prefs(prefs: dict):
+    try:
+        import json as _json
+        with open(STARTUP_PREFS_FILE, "w", encoding="utf-8") as f:
+            _json.dump(prefs, f, indent=2)
+    except Exception as e:
+        print(f"[Startup] Could not save {STARTUP_PREFS_FILE}: {e}")
+
 
 def _ask_startup_mode():
     """
     Shown once, right after the hidden host root is created and before the
     splash screen appears. Lets the user pick between Full GUI Mode and
     Lite Mode (fewer widgets built up front, slower background refresh
-    intervals) for weaker computers. Returns nothing — sets the global
-    APP_LITE_MODE flag directly.
+    intervals) for weaker computers, and whether to play the extended,
+    full-screen ~8s intro animation instead of the short one. Returns
+    nothing — sets the global APP_LITE_MODE and APP_EXTENDED_INTRO flags
+    directly. The extended-intro choice is remembered across launches.
     """
-    global APP_LITE_MODE
+    global APP_LITE_MODE, APP_EXTENDED_INTRO
+
+    prefs = _load_startup_prefs()
+    remembered_extended_intro = bool(prefs.get("extended_intro", False))
+
+    # ── Detect system specs and decide which mode to recommend ──
+    recommend_lite = False
+    spec_summary = ""
+    try:
+        import psutil
+        total_ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+        cpu_cores    = psutil.cpu_count(logical=True) or 1
+
+        # Simple heuristic: recommend Lite Mode on lower-end machines.
+        # Full GUI Mode builds every tab up front and polls more often, so
+        # it benefits from more headroom than a bare minimum system has.
+        if total_ram_gb < 6 or cpu_cores <= 2:
+            recommend_lite = True
+
+        spec_summary = f"Detected: {total_ram_gb:.1f} GB RAM, {cpu_cores} CPU cores"
+        print(f"[Startup] {spec_summary} — recommending "
+              f"{'Lite' if recommend_lite else 'Full GUI'} Mode")
+    except Exception as e:
+        print(f"[Startup] Could not detect system specs: {e}")
+        spec_summary = ""
 
     dlg = tk.Toplevel(_host_root)
     dlg.title("")
     dlg.resizable(False, False)
     dlg.overrideredirect(True)
-    W, H = 460, 260
+    W, H = 460, 360
     sw = dlg.winfo_screenwidth()
     sh = dlg.winfo_screenheight()
     x  = (sw - W) // 2
@@ -165,27 +216,49 @@ def _ask_startup_mode():
 
     tk.Label(inner, text="Choose Startup Mode",
              bg="#0f0f1a", fg="#ffffff",
-             font=("Segoe UI", 15, "bold")).pack(pady=(22, 4))
+             font=("Segoe UI", 15, "bold")).pack(pady=(20, 4))
 
     tk.Label(inner,
              text="Pick Lite Mode if your computer is older or slower.\n"
                   "You can't switch modes without restarting the app.",
              bg="#0f0f1a", fg="#aaaaaa",
-             font=("Segoe UI", 9), justify="center").pack(pady=(0, 18))
+             font=("Segoe UI", 9), justify="center").pack(pady=(0, 6))
 
-    result = {"lite": False}
+    if spec_summary:
+        rec_text = ("Recommended: Lite Mode" if recommend_lite
+                    else "Recommended: Full GUI Mode")
+        rec_color = "#3ddc97" if recommend_lite else "#a684e8"
+        tk.Label(inner, text=spec_summary,
+                 bg="#0f0f1a", fg="#666680",
+                 font=("Segoe UI", 8)).pack(pady=(0, 1))
+        tk.Label(inner, text=rec_text,
+                 bg="#0f0f1a", fg=rec_color,
+                 font=("Segoe UI", 9, "bold")).pack(pady=(0, 10))
+    else:
+        tk.Label(inner, text="").pack(pady=(0, 14))   # keeps layout consistent
+
+    result = {"lite": recommend_lite, "extended_intro": remembered_extended_intro}
 
     def _choose(lite: bool):
         result["lite"] = lite
         dlg.destroy()
 
     btn_row = tk.Frame(inner, bg="#0f0f1a")
-    btn_row.pack(pady=(0, 10))
+    btn_row.pack(pady=(0, 4))
+
+    # Recommended option gets a bright border to draw the eye, without
+    # hiding or disabling the other choice — it's a suggestion, not a lock.
+    full_highlight = bool(spec_summary) and not recommend_lite
+    lite_highlight = bool(spec_summary) and recommend_lite
 
     full_btn = tk.Button(
-        btn_row, text="🖥  Full GUI Mode\n(all features, more RAM/CPU)",
+        btn_row,
+        text=("⭐ " if full_highlight else "") + "🖥  Full GUI Mode\n(all features, more RAM/CPU)",
         bg="#7c5cbf", fg="#ffffff", activebackground="#a684e8",
-        activeforeground="#ffffff", relief="flat", bd=0,
+        activeforeground="#ffffff", relief="flat",
+        bd=3 if full_highlight else 0,
+        highlightthickness=2 if full_highlight else 0,
+        highlightbackground="#f0c060", highlightcolor="#f0c060",
         font=("Segoe UI", 9, "bold"), justify="center",
         width=22, height=3, cursor="hand2",
         command=lambda: _choose(False),
@@ -193,14 +266,37 @@ def _ask_startup_mode():
     full_btn.pack(side="left", padx=(0, 8))
 
     lite_btn = tk.Button(
-        btn_row, text="🪶  Lite Mode\n(fewer widgets, lower usage)",
+        btn_row,
+        text=("⭐ " if lite_highlight else "") + "🪶  Lite Mode\n(fewer widgets, lower usage)",
         bg="#1e1e2e", fg="#3ddc97", activebackground="#2a2a3e",
-        activeforeground="#3ddc97", relief="flat", bd=0,
+        activeforeground="#3ddc97", relief="flat",
+        bd=3 if lite_highlight else 0,
+        highlightthickness=2 if lite_highlight else 0,
+        highlightbackground="#f0c060", highlightcolor="#f0c060",
         font=("Segoe UI", 9, "bold"), justify="center",
         width=22, height=3, cursor="hand2",
         command=lambda: _choose(True),
     )
     lite_btn.pack(side="left")
+
+    # ── Extended intro animation checkbox ──
+    extended_var = tk.BooleanVar(value=remembered_extended_intro)
+
+    def _on_extended_toggle():
+        result["extended_intro"] = extended_var.get()
+
+    intro_check = tk.Checkbutton(
+        inner, text="Play extended intro animation (~8s, full screen)",
+        variable=extended_var, command=_on_extended_toggle,
+        bg="#0f0f1a", fg="#cccccc", selectcolor="#1e1e2e",
+        activebackground="#0f0f1a", activeforeground="#ffffff",
+        font=("Segoe UI", 9), cursor="hand2",
+    )
+    intro_check.pack(pady=(14, 0))
+
+    tk.Label(inner, text="Otherwise the quick ~4s animation plays instead.",
+             bg="#0f0f1a", fg="#666680",
+             font=("Segoe UI", 8)).pack(pady=(2, 0))
 
     tk.Label(inner, text="Script by Nexovative",
              bg="#0f0f1a", fg="#f0c060",
@@ -215,7 +311,10 @@ def _ask_startup_mode():
     dlg.wait_window(dlg)
 
     APP_LITE_MODE = result["lite"]
-    print(f"[Startup] Mode selected: {'LITE' if APP_LITE_MODE else 'FULL GUI'}")
+    APP_EXTENDED_INTRO = result["extended_intro"]
+    _save_startup_prefs({"extended_intro": APP_EXTENDED_INTRO})
+    print(f"[Startup] Mode selected: {'LITE' if APP_LITE_MODE else 'FULL GUI'}, "
+          f"extended intro: {APP_EXTENDED_INTRO}")
 
 
 def _create_splash():
@@ -668,6 +767,301 @@ def _play_splash_outro_animation():
         print(f"[Splash] outro animation error: {e}")
 
 
+def _play_extended_intro_animation():
+    """
+    Opt-in ~8 second, full-screen cinematic intro, shown instead of the
+    short splash outro animation when the user checked "Play extended
+    intro animation" on the startup mode screen. Runs in its own
+    full-screen borderless Toplevel (separate from the small splash
+    window) so it can fill the entire display. Fully synchronous, same
+    approach as the short animation: time.sleep + root.update() in a loop.
+    """
+    global _host_root
+
+    if _host_root is None:
+        print("[Intro] extended animation skipped — no host root")
+        return
+
+    try:
+        import random
+        import math
+        random.seed()
+
+        print("[Intro] playing extended ~8s intro animation...")
+
+        BG = "#0a0a14"
+        win = tk.Toplevel(_host_root)
+        win.overrideredirect(True)
+        win.configure(bg=BG)
+        sw = win.winfo_screenwidth()
+        sh = win.winfo_screenheight()
+        win.geometry(f"{sw}x{sh}+0+0")
+        win.attributes("-topmost", True)
+        win.lift()
+        win.focus_force()
+
+        canvas = tk.Canvas(win, width=sw, height=sh, bg=BG,
+                            highlightthickness=0, bd=0)
+        canvas.pack(fill="both", expand=True)
+        win.update_idletasks()
+        win.update()
+
+        cx, cy = sw // 2, sh // 2
+
+        def _ease_out_cubic(t):
+            return 1 - (1 - t) ** 3
+
+        def _ease_in_out(t):
+            return 3 * t * t - 2 * t * t * t
+
+        def _lerp_color(c1, c2, t):
+            r1 = win.winfo_rgb(c1)
+            r2 = win.winfo_rgb(c2)
+            r = int(r1[0] + (r2[0] - r1[0]) * t) >> 8
+            g = int(r1[1] + (r2[1] - r1[1]) * t) >> 8
+            b = int(r1[2] + (r2[2] - r1[2]) * t) >> 8
+            return f"#{r:02x}{g:02x}{b:02x}"
+
+        def _tick(delay=0.02):
+            win.update_idletasks()
+            win.update()
+            time.sleep(delay)
+
+        # ── Layer 0: deep parallax starfield across the whole screen ──
+        STAR_COUNT = 140
+        star_colors = ["#3d3d5c", "#4a4a6e", "#5a5a80", "#6b5ca0", "#7c5cbf"]
+        stars = []
+        for _ in range(STAR_COUNT):
+            sx = random.randint(0, sw)
+            sy = random.randint(0, sh)
+            depth = random.uniform(0.3, 1.0)   # closer stars (higher depth) drift faster & brighter
+            r = 0.6 + depth * 1.8
+            item = canvas.create_oval(sx - r, sy - r, sx + r, sy + r,
+                                       fill=BG, outline="", tags="star")
+            stars.append({
+                "item": item, "x": sx, "y": sy, "depth": depth,
+                "color": random.choice(star_colors),
+                "phase": random.uniform(0, 6.28), "speed": random.uniform(0.1, 0.35),
+            })
+
+        def _twinkle_frame(t_elapsed):
+            for s in stars:
+                brightness = 0.5 + 0.5 * math.sin(t_elapsed * s["speed"] * 10 + s["phase"])
+                brightness = max(0.0, brightness) * (0.5 + 0.5 * s["depth"])
+                color = _lerp_color(BG, s["color"], brightness)
+                canvas.itemconfigure(s["item"], fill=color)
+
+        elapsed = 0.0
+
+        # ── Phase 1: starfield fades in (~1.5s) ──
+        _play_chime([392.00, 523.25], note_duration=0.25, volume=0.15)
+        for step in range(1, 46):
+            elapsed += 0.036
+            _twinkle_frame(elapsed)
+            _tick(0.036)
+
+        # ── Phase 2: expanding concentric rings pulse outward from center
+        # (~2.5s), like a shockwave announcing the logo is coming ──
+        _play_chime([261.63, 329.63, 392.00], note_duration=0.14, volume=0.18)
+        RING_WAVES = 3
+        ring_colors = ["#7c5cbf", "#a684e8", "#3ddc97"]
+        for wave in range(RING_WAVES):
+            ring = canvas.create_oval(cx, cy, cx, cy, outline=ring_colors[wave % len(ring_colors)],
+                                       width=3, tags="ring")
+            RING_STEPS = 22
+            max_r = min(sw, sh) * 0.42
+            for step in range(1, RING_STEPS + 1):
+                t = _ease_out_cubic(step / RING_STEPS)
+                r = max_r * t
+                fade = 1.0 - t
+                color = _lerp_color(BG, ring_colors[wave % len(ring_colors)], fade)
+                canvas.coords(ring, cx - r, cy - r, cx + r, cy + r)
+                canvas.itemconfigure(ring, outline=color)
+                elapsed += 0.018
+                _twinkle_frame(elapsed)
+                _tick(0.018)
+            canvas.delete(ring)
+
+        # ── Phase 3: orbiting particles spiral inward and settle into a
+        # ring around where the wordmark will appear (~2s) ──
+        ORBIT_COUNT = 24
+        orbit_radius = min(sw, sh) * 0.22
+        orbit_particles = []
+        for i in range(ORBIT_COUNT):
+            ang = (i / ORBIT_COUNT) * 2 * math.pi
+            start_dist = random.uniform(max(sw, sh) * 0.5, max(sw, sh) * 0.7)
+            sx = cx + math.cos(ang) * start_dist
+            sy = cy + math.sin(ang) * start_dist
+            color = random.choice(["#a684e8", "#3ddc97", "#f0c060"])
+            item = canvas.create_oval(sx - 2.5, sy - 2.5, sx + 2.5, sy + 2.5,
+                                       fill=color, outline="", tags="orbit")
+            orbit_particles.append({"item": item, "angle": ang, "color": color})
+
+        SPIRAL_STEPS = 32
+        for step in range(1, SPIRAL_STEPS + 1):
+            t = _ease_out_cubic(step / SPIRAL_STEPS)
+            for p in orbit_particles:
+                ang = p["angle"] + t * math.pi * 1.4   # spins in while closing distance
+                dist = orbit_radius + (1 - t) * (min(sw, sh) * 0.35)
+                px = cx + math.cos(ang) * dist
+                py = cy + math.sin(ang) * dist * 0.55   # slightly flattened ellipse orbit
+                canvas.coords(p["item"], px - 2.5, py - 2.5, px + 2.5, py + 2.5)
+                p["last_pos"] = (px, py)
+            elapsed += 0.02
+            _twinkle_frame(elapsed)
+            _tick(0.02)
+
+        # ── Phase 4: big wordmark reveal, letter by letter (~2.5s) ──
+        _play_chime([392.00, 523.25, 659.25], note_duration=0.1, volume=0.2)
+        word = "NEXOVATIVE"
+        font_size = max(28, min(64, sw // 16))
+        font_name = ("Segoe UI", font_size, "bold")
+        letter_gap = font_size * 1.15
+        total_width = letter_gap * (len(word) - 1)
+        start_x = cx - total_width / 2
+        base_y = cy
+        rise = 40
+
+        letter_ids = []
+        STEPS = 7
+        for i, ch in enumerate(word):
+            x = start_x + i * letter_gap
+            item = canvas.create_text(x, base_y + rise, text=ch,
+                                       font=font_name, fill=BG, anchor="center")
+            letter_ids.append(item)
+            for step in range(1, STEPS + 1):
+                t = _ease_out_cubic(step / STEPS)
+                y = (base_y + rise) - rise * t
+                color = _lerp_color(BG, "#a684e8", t)
+                canvas.coords(item, x, y)
+                canvas.itemconfigure(item, fill=color)
+                elapsed += 0.012
+                _twinkle_frame(elapsed)
+                # keep orbiting particles alive and spinning during the reveal
+                for p in orbit_particles:
+                    p["angle"] += 0.05
+                    px = cx + math.cos(p["angle"]) * orbit_radius
+                    py = cy + math.sin(p["angle"]) * orbit_radius * 0.55
+                    canvas.coords(p["item"], px - 2.5, py - 2.5, px + 2.5, py + 2.5)
+                canvas.tag_raise(item)
+                _tick(0.012)
+            canvas.itemconfigure(item, fill="#a684e8")
+            elapsed += 0.07
+            _twinkle_frame(elapsed)
+            _tick(0.07)
+
+        # ── Phase 5: glow underline sweep (~0.6s) ──
+        _play_chime([440.00, 554.37, 659.25], note_duration=0.1, volume=0.2)
+        line_y = base_y + font_size * 0.9
+        glow = canvas.create_line(start_x, line_y, start_x, line_y,
+                                   fill="#3ddc97", width=3, capstyle="round")
+        end_x = start_x + total_width + 18
+        SWEEP_STEPS = 24
+        for step in range(1, SWEEP_STEPS + 1):
+            t = _ease_out_cubic(step / SWEEP_STEPS)
+            x2 = (start_x - 18) + (end_x - (start_x - 18)) * t
+            canvas.coords(glow, start_x - 18, line_y, x2, line_y)
+            elapsed += 0.02
+            _twinkle_frame(elapsed)
+            _tick(0.02)
+
+        # ── Phase 6: orbiting particles collapse into the underline as a
+        # trail of light, then the ring disperses (~1.5s) ──
+        COLLAPSE_STEPS = 18
+        for step in range(1, COLLAPSE_STEPS + 1):
+            t = _ease_in_out(step / COLLAPSE_STEPS)
+            for p in orbit_particles:
+                p["angle"] += 0.06
+                orbit_x = cx + math.cos(p["angle"]) * orbit_radius
+                orbit_y = cy + math.sin(p["angle"]) * orbit_radius * 0.55
+                target_x = start_x + random.uniform(0, total_width)
+                target_y = line_y
+                px = orbit_x + (target_x - orbit_x) * t
+                py = orbit_y + (target_y - orbit_y) * t
+                size = max(0.5, 2.5 * (1 - t))
+                canvas.coords(p["item"], px - size, py - size, px + size, py + size)
+            elapsed += 0.02
+            _twinkle_frame(elapsed)
+            _tick(0.02)
+        for p in orbit_particles:
+            canvas.delete(p["item"])
+
+        # ── Phase 7: extended gradient pulse across the wordmark (~2.5s) ──
+        pulse_colors = ["#a684e8", "#3ddc97", "#f0c060", "#7c5cbf", "#3ddc97", "#a684e8"]
+        PULSE_STEPS = 12
+        for c_from, c_to in zip(pulse_colors, pulse_colors[1:]):
+            for step in range(1, PULSE_STEPS + 1):
+                t = step / PULSE_STEPS
+                color = _lerp_color(c_from, c_to, t)
+                for item in letter_ids:
+                    canvas.itemconfigure(item, fill=color)
+                canvas.itemconfigure(glow, fill=color)
+                elapsed += 0.02
+                _twinkle_frame(elapsed)
+                _tick(0.02)
+
+        # ── Phase 8: big finale sparkle burst (~1.2s) ──
+        _play_chime([659.25, 830.61, 987.77, 1174.66], note_duration=0.09, volume=0.24)
+        burst_cx, burst_cy = cx, base_y - font_size * 0.3
+        SPARK_COUNT = 60
+        sparks = []
+        for _ in range(SPARK_COUNT):
+            ang = random.uniform(0, 2 * math.pi)
+            dist = random.uniform(sw * 0.08, sw * 0.28)
+            tx = burst_cx + math.cos(ang) * dist
+            ty = burst_cy + math.sin(ang) * dist * 0.6
+            color = random.choice(["#a684e8", "#3ddc97", "#f0c060", "#ffffff"])
+            item = canvas.create_oval(burst_cx - 2, burst_cy - 2, burst_cx + 2, burst_cy + 2,
+                                       fill=color, outline="", tags="spark")
+            sparks.append({"item": item, "tx": tx, "ty": ty, "color": color})
+
+        BURST_STEPS = 24
+        for step in range(1, BURST_STEPS + 1):
+            t = _ease_out_cubic(step / BURST_STEPS)
+            fade = 1.0 - (step / BURST_STEPS) ** 2
+            for sp in sparks:
+                sx = burst_cx + (sp["tx"] - burst_cx) * t
+                sy = burst_cy + (sp["ty"] - burst_cy) * t
+                sz = 2.5 * fade + 0.3
+                col = _lerp_color(BG, sp["color"], max(0.0, fade))
+                canvas.coords(sp["item"], sx - sz, sy - sz, sx + sz, sy + sz)
+                canvas.itemconfigure(sp["item"], fill=col)
+            elapsed += 0.02
+            _twinkle_frame(elapsed)
+            _tick(0.02)
+
+        # Settle back to the accent color and hold on the finished word.
+        for item in letter_ids:
+            canvas.itemconfigure(item, fill="#a684e8")
+        canvas.itemconfigure(glow, fill="#3ddc97")
+        for _ in range(30):
+            elapsed += 0.03
+            _twinkle_frame(elapsed)
+            _tick(0.03)
+
+        # ── Phase 9: fade to black, then close (~1s) ──
+        # Simple fade: layer increasingly opaque black rectangles using
+        # stipple patterns, each one darker than the last.
+        stipple_steps = ["gray12", "gray25", "gray50", "gray75", None]
+        for stipple in stipple_steps:
+            canvas.create_rectangle(0, 0, sw, sh, fill="#000000",
+                                     outline="", stipple=stipple if stipple else "")
+            _tick(0.06)
+
+        try:
+            win.attributes("-topmost", False)
+        except Exception:
+            pass
+        win.destroy()
+        print("[Intro] extended animation finished")
+    except Exception as e:
+        print(f"[Intro] extended animation error: {e}")
+        try:
+            win.destroy()
+        except Exception:
+            pass   # win may not have been created yet if the failure happened early
+
+
 def _close_splash():
     global _splash_root
     if _splash_root:
@@ -767,6 +1161,15 @@ except ImportError:
     _PYGAME_OK = False
     print("[Music] pygame not installed — background music player will be disabled. "
           "Run: pip install pygame")
+
+try:
+    import psutil
+    _PSUTIL_OK = True
+except ImportError:
+    psutil     = None
+    _PSUTIL_OK = False
+    print("[SysMonitor] psutil not installed — CPU/RAM usage display and Lite Mode "
+          "recommendation will be disabled. Run: pip install psutil")
 
 _update_splash(80, "Initializing VirtualBox manager...")
 
@@ -3825,6 +4228,7 @@ class NexovativeControlCenter:
         load_scheduler_config()
         load_custom_commands()
         self._build_ui()
+        self._setup_konami_code_listener()
 
     # ── TTK Styles ──
     def _make_context_menu(self, widget, is_text=False):
@@ -3954,9 +4358,22 @@ class NexovativeControlCenter:
         title_bar = tk.Frame(self.root, bg=self.BG2, height=48)
         title_bar.pack(fill="x", side="top")
         title_bar.pack_propagate(False)
-        tk.Label(title_bar, text="🤖  Nexovative Control Center",
+        self._title_label = tk.Label(title_bar, text="🤖  Nexovative Control Center",
                  bg=self.BG2, fg=self.TEXT,
-                 font=("Segoe UI", 13, "bold")).pack(side="left", padx=16, pady=8)
+                 font=("Segoe UI", 13, "bold"), cursor="hand2")
+        self._title_label.pack(side="left", padx=16, pady=8)
+        self._title_click_count = 0
+        self._title_click_reset_job = None
+        self._title_label.bind("<Button-1>", self._on_title_click)
+
+        # ── System resource monitor (CPU / RAM usage) ──
+        self._sysmon_label = tk.Label(
+            title_bar, text="", bg=self.BG2, fg=self.TEXTDIM,
+            font=("Segoe UI", 9))
+        if _PSUTIL_OK:
+            self._sysmon_label.pack(side="left", padx=(4, 0))
+            self._start_system_monitor()
+
         self._status_dot = tk.Label(title_bar, text="⬤  Stopped",
                                     bg=self.BG2, fg=self.RED,
                                     font=("Segoe UI", 10, "bold"))
@@ -4015,6 +4432,7 @@ class NexovativeControlCenter:
         nb_outer.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
         nb = ttk.Notebook(nb_outer)
+        self.nb = nb   # kept for dynamic tab insertion (e.g. the hidden Fun tab easter egg)
         nb.pack(fill="both", expand=True)
 
         # Horizontal scrollbar that only appears when tabs overflow
@@ -4098,6 +4516,7 @@ class NexovativeControlCenter:
         nb.add(tab13, text="📅 Sched")
         nb.add(tab14, text="🖱 Real PC")
         nb.add(tab15, text="🔄 Reconnect")
+        self._fun_tab_anchor = tab15   # hidden Fun tab (easter egg) is inserted right before this one
 
         if not APP_LITE_MODE:
             # ── Full GUI Mode: build every tab immediately, as before. ──
@@ -5088,7 +5507,11 @@ class NexovativeControlCenter:
         self._unsaved_tabs = set()
         self._current_tab  = 0
         self._dirty_tabs   = set()   # clear dirty flags — widgets are fresh
+        was_fun_tab_revealed = getattr(self, "_fun_tab_revealed", False)
+        self._fun_tab_revealed = False   # tabs were just destroyed — allow re-adding it
         self._build_ui()
+        if was_fun_tab_revealed:
+            self._reveal_fun_tab(celebrate=False)
 
         # Restore tab — search recursively again after rebuild
         try:
@@ -5503,8 +5926,9 @@ class NexovativeControlCenter:
                 start_vm()
                 self.root.after(0, lambda: self._vm_set_last("Started ✔", self.GREEN))
             except Exception as e:
-                self.root.after(0, lambda: self._vm_set_last(f"Error: {e}", self.RED))
-                print(f"[VM] Start error: {e}")
+                err_msg = str(e)
+                self.root.after(0, lambda err_msg=err_msg: self._vm_set_last(f"Error: {err_msg}", self.RED))
+                print(f"[VM] Start error: {err_msg}")
         threading.Thread(target=run, daemon=True).start()
 
     def _vm_restart(self):
@@ -5524,8 +5948,9 @@ class NexovativeControlCenter:
                 play_success_sound()
                 self.root.after(0, lambda: self._vm_set_last("Restarted ✔", self.GREEN))
             except Exception as e:
-                self.root.after(0, lambda: self._vm_set_last(f"Error: {e}", self.RED))
-                print(f"[VM] Restart error: {e}")
+                err_msg = str(e)
+                self.root.after(0, lambda err_msg=err_msg: self._vm_set_last(f"Error: {err_msg}", self.RED))
+                print(f"[VM] Restart error: {err_msg}")
         threading.Thread(target=run, daemon=True).start()
 
     def _vm_revert(self):
@@ -5556,8 +5981,9 @@ class NexovativeControlCenter:
                 self.root.after(0, lambda: self._vm_set_last("Reverted ✔", self.GREEN))
             except Exception as e:
                 update_status("Revert failed")
-                self.root.after(0, lambda: self._vm_set_last(f"Error: {e}", self.RED))
-                print(f"[VM] Revert error: {e}")
+                err_msg = str(e)
+                self.root.after(0, lambda err_msg=err_msg: self._vm_set_last(f"Error: {err_msg}", self.RED))
+                print(f"[VM] Revert error: {err_msg}")
             finally:
                 revert_start_time = None
                 revert_in_progress = False
@@ -5580,8 +6006,9 @@ class NexovativeControlCenter:
                 update_status("Stopped")
                 self.root.after(0, lambda: self._vm_set_last("Powered off ✔", self.TEXTDIM))
             except Exception as e:
-                self.root.after(0, lambda: self._vm_set_last(f"Error: {e}", self.RED))
-                print(f"[VM] Shutdown error: {e}")
+                err_msg = str(e)
+                self.root.after(0, lambda err_msg=err_msg: self._vm_set_last(f"Error: {err_msg}", self.RED))
+                print(f"[VM] Shutdown error: {err_msg}")
         threading.Thread(target=run, daemon=True).start()
 
     # ──────────────── Helpers ────────────────
@@ -7934,6 +8361,1055 @@ class NexovativeControlCenter:
     # ──────────────── Welcome / User Guide ────────────────
     GUIDE_FLAG_FILE = "guide_seen.flag"
 
+    # ── System resource monitor ──
+    def _start_system_monitor(self):
+        """
+        Periodically refreshes the CPU/RAM usage label in the title bar
+        using psutil. Uses root.after() so it runs on Tkinter's own event
+        loop — no extra thread needed. Refresh interval is slower in Lite
+        Mode to keep background overhead minimal on weaker machines.
+        """
+        if not _PSUTIL_OK:
+            return
+
+        # First call to cpu_percent() with no interval just primes the
+        # internal counter and returns 0.0 — call it once up front so the
+        # first real reading a moment later is meaningful.
+        try:
+            psutil.cpu_percent(interval=None)
+        except Exception:
+            pass
+
+        refresh_ms = 4000 if APP_LITE_MODE else 2000
+
+        def _update_sysmon():
+            try:
+                cpu_pct = psutil.cpu_percent(interval=None)
+                ram = psutil.virtual_memory()
+                ram_pct = ram.percent
+
+                # Color-code so a glance at the title bar tells you if
+                # something is under real load, without needing to open
+                # Task Manager.
+                def _color_for(pct):
+                    if pct >= 85:
+                        return self.RED
+                    if pct >= 60:
+                        return "#f0c060"
+                    return self.TEXTDIM
+
+                cpu_color = _color_for(cpu_pct)
+                ram_color = _color_for(ram_pct)
+
+                # Tkinter labels can't mix colors in one widget, so we show
+                # the more urgent of the two as the label's color and both
+                # numbers together in the text.
+                worst_color = cpu_color if cpu_pct >= ram_pct else ram_color
+                self._sysmon_label.configure(
+                    text=f"🧠 CPU {cpu_pct:.0f}%   💾 RAM {ram_pct:.0f}%",
+                    fg=worst_color if (cpu_pct >= 60 or ram_pct >= 60) else self.TEXTDIM,
+                )
+            except Exception:
+                pass
+            finally:
+                self.root.after(refresh_ms, _update_sysmon)
+
+        self.root.after(500, _update_sysmon)
+
+    # ── Easter eggs ──
+    def _on_title_click(self, event=None):
+        """
+        Counts rapid clicks on the title label. 10 clicks within a few
+        seconds triggers a little celebration overlay. The counter resets
+        if the person pauses for more than 2 seconds between clicks.
+        """
+        self._title_click_count += 1
+
+        if self._title_click_reset_job is not None:
+            try:
+                self.root.after_cancel(self._title_click_reset_job)
+            except Exception:
+                pass
+
+        if self._title_click_count >= 10:
+            self._title_click_count = 0
+            self._trigger_easter_egg("clicks")
+        else:
+            def _reset():
+                self._title_click_count = 0
+            self._title_click_reset_job = self.root.after(2000, _reset)
+
+    def _setup_konami_code_listener(self):
+        """
+        Binds a global key listener for the classic Konami Code
+        (↑ ↑ ↓ ↓ ← → ← → B A). Matching the full sequence triggers the
+        same celebration overlay as the title-click easter egg.
+        """
+        konami_sequence = [
+            "Up", "Up", "Down", "Down",
+            "Left", "Right", "Left", "Right",
+            "b", "a",
+        ]
+        self._konami_progress = []
+
+        def _on_key(event):
+            # Don't track keystrokes while the user is typing in a text
+            # input — avoids both accidental triggers and broken typing
+            # flow if arrow keys happen to be used for cursor movement.
+            widget_class = event.widget.winfo_class() if event.widget else ""
+            if widget_class in ("Entry", "TEntry", "Text", "TCombobox"):
+                return
+
+            key = event.keysym
+            expected = konami_sequence[len(self._konami_progress)]
+            # Letter keys are compared case-insensitively; arrow keys are
+            # compared as-is (Tkinter keysyms are already "Up"/"Down"/etc).
+            match = (key.lower() == expected.lower()) if len(expected) == 1 else (key == expected)
+
+            if match:
+                self._konami_progress.append(key)
+                if len(self._konami_progress) == len(konami_sequence):
+                    self._konami_progress = []
+                    self._trigger_easter_egg("konami")
+            else:
+                # Allow the sequence to restart from this key if it happens
+                # to also be the first key of the sequence.
+                self._konami_progress = [key] if key == konami_sequence[0] else []
+
+        self.root.bind_all("<KeyPress>", _on_key)
+        self._setup_secret_code_listener()
+
+    def _setup_secret_code_listener(self):
+        """
+        Tracks keystrokes anywhere in the GUI for the hidden sequence
+        "SECRET0091" (case-insensitive). Typing it in full reveals a
+        hidden "🎉 Fun" tab next to Reconnect, with a couple of small
+        just-for-fun tools (CPS test, typing speed test). Unlike the
+        Konami listener, this one still tracks keystrokes while an Entry
+        or Text widget has focus, since the whole point is that the user
+        can type it anywhere without needing to click away first.
+        """
+        secret_code = "secret0091"
+        self._secret_code_progress = ""
+
+        def _on_key(event):
+            char = event.char.lower() if event.char else ""
+            if not char or not char.isprintable():
+                return
+
+            expected_next = secret_code[len(self._secret_code_progress)]
+            if char == expected_next:
+                self._secret_code_progress += char
+                if self._secret_code_progress == secret_code:
+                    self._secret_code_progress = ""
+                    self._reveal_fun_tab()
+            else:
+                # Restart the match from this character if it happens to
+                # also be the sequence's first character.
+                self._secret_code_progress = char if char == secret_code[0] else ""
+
+        self.root.bind_all("<KeyPress>", _on_key, add="+")
+
+    def _trigger_easter_egg(self, source):
+        """
+        Plays a short, fun celebration overlay on top of the main window:
+        a burst of colorful confetti pieces falling with physics-like
+        drift, plus a cheeky congratulatory message and a quick chime.
+        Fully driven by root.after() on the main thread — no extra thread
+        needed, and no risk of touching Tkinter widgets off the main thread.
+        """
+        print(f"[EasterEgg] triggered via {source}")
+
+        overlay = tk.Toplevel(self.root)
+        overlay.overrideredirect(True)
+        overlay.attributes("-topmost", True)
+        overlay.attributes("-alpha", 0.0)
+        try:
+            overlay.attributes("-transparentcolor", "#010101")
+            overlay.configure(bg="#010101")
+            bg_color = "#010101"
+        except Exception:
+            # -transparentcolor isn't supported on all platforms; fall back
+            # to a solid dark overlay instead of a see-through one.
+            overlay.configure(bg="#0f0f1a")
+            bg_color = "#0f0f1a"
+
+        import random as _random
+        import math as _math
+
+        rw = self.root.winfo_width() or 900
+        rh = self.root.winfo_height() or 650
+        rx = self.root.winfo_x()
+        ry = self.root.winfo_y()
+        overlay.geometry(f"{rw}x{rh}+{rx}+{ry}")
+
+        canvas = tk.Canvas(overlay, width=rw, height=rh, bg=bg_color,
+                            highlightthickness=0, bd=0)
+        canvas.pack(fill="both", expand=True)
+        overlay.attributes("-alpha", 1.0)
+
+        messages = [
+            "🎉 You found a secret!",
+            "✨ Nice one, explorer!",
+            "🎊 Achievement unlocked: Curious Clicker",
+            "🥚 Easter egg found!",
+        ]
+        msg = tk.Label(canvas, text=_random.choice(messages),
+                       bg=bg_color, fg="#f0c060",
+                       font=("Segoe UI", 18, "bold"))
+        msg_window = canvas.create_window(rw // 2, 50, window=msg)
+
+        _play_chime([659.25, 830.61, 987.77, 1318.51], note_duration=0.09, volume=0.22)
+
+        confetti_colors = ["#a684e8", "#3ddc97", "#f0c060", "#ff6b9d", "#4ec5ff"]
+        pieces = []
+        for _ in range(70):
+            x = _random.randint(0, rw)
+            y = _random.randint(-rh, 0)
+            size = _random.uniform(3, 7)
+            color = _random.choice(confetti_colors)
+            item = canvas.create_rectangle(x, y, x + size, y + size,
+                                            fill=color, outline="")
+            pieces.append({
+                "item": item, "x": x, "y": y, "size": size,
+                "vy": _random.uniform(2.5, 5.5),
+                "drift": _random.uniform(-1.5, 1.5),
+                "phase": _random.uniform(0, 6.28),
+            })
+
+        def _animate(frame=0):
+            if frame >= 90 or not overlay.winfo_exists():
+                try:
+                    overlay.destroy()
+                except Exception:
+                    pass
+                return
+            try:
+                for p in pieces:
+                    p["y"] += p["vy"]
+                    p["x"] += p["drift"] + _math.sin(frame * 0.15 + p["phase"]) * 0.8
+                    canvas.coords(p["item"], p["x"], p["y"],
+                                  p["x"] + p["size"], p["y"] + p["size"])
+                    if p["y"] > rh:
+                        p["y"] = _random.randint(-40, -10)
+                        p["x"] = _random.randint(0, rw)
+                # Fade the message out over the last ~20 frames.
+                if frame > 65:
+                    fade = max(0.0, 1.0 - (frame - 65) / 25)
+                    color = self._lerp_color_static(bg_color, "#f0c060", fade)
+                    canvas.itemconfigure(msg_window, state="normal")
+                    msg.configure(fg=color)
+                self.root.after(16, lambda: _animate(frame + 1))
+            except Exception:
+                try:
+                    overlay.destroy()
+                except Exception:
+                    pass
+
+        _animate()
+
+    @staticmethod
+    def _lerp_color_static(c1, c2, t):
+        """Standalone hex color interpolation helper, used by the easter egg overlay."""
+        r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
+        r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+        r = int(r1 + (r2 - r1) * t)
+        g = int(g1 + (g2 - g1) * t)
+        b = int(b1 + (b2 - b1) * t)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def _reveal_fun_tab(self, celebrate=True):
+        """
+        Inserts a hidden "🎉 Fun" tab right before the Reconnect tab, the
+        first time the secret code is typed. Safe to trigger more than
+        once — does nothing if the tab already exists. Pass
+        celebrate=False when silently re-adding the tab after a theme
+        rebuild, so the confetti/chime only ever plays once per real
+        discovery.
+        """
+        if getattr(self, "_fun_tab_revealed", False):
+            return
+        self._fun_tab_revealed = True
+
+        print("[EasterEgg] secret code entered — revealing Fun tab")
+
+        fun_tab = ttk.Frame(self.nb)
+        try:
+            reconnect_idx = self.nb.index(self._fun_tab_anchor)
+        except Exception:
+            reconnect_idx = "end"
+        self.nb.insert(reconnect_idx, fun_tab, text="🎉 Fun")
+        self._build_fun_tab(fun_tab)
+
+        if celebrate:
+            # Small celebratory flourish so it's obvious something happened,
+            # then jump straight to the new tab.
+            _play_chime([523.25, 659.25, 783.99, 1046.50], note_duration=0.1, volume=0.22)
+            self.nb.select(fun_tab)
+            self._trigger_easter_egg("secret_code")
+
+    def _build_fun_tab(self, parent):
+        """
+        Builds the hidden Fun tab as its own small notebook of just-for-fun
+        tools: skill tests (typing speed + CPS), a reaction time test, a
+        Snake mini-game, and a random tools panel (dice/coin flip/name
+        picker). Everything here is purely local — nothing is saved or
+        sent anywhere.
+        """
+        outer = tk.Frame(parent, bg=self.BG)
+        outer.pack(fill="both", expand=True, padx=16, pady=16)
+
+        tk.Label(outer, text="🎉 Just for Fun",
+                 bg=self.BG, fg=self.TEXT,
+                 font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(0, 12))
+
+        fun_nb = ttk.Notebook(outer)
+        fun_nb.pack(fill="both", expand=True)
+
+        skills_tab   = ttk.Frame(fun_nb)
+        reaction_tab = ttk.Frame(fun_nb)
+        snake_tab    = ttk.Frame(fun_nb)
+        random_tab   = ttk.Frame(fun_nb)
+
+        fun_nb.add(skills_tab,   text="⌨ Skill Tests")
+        fun_nb.add(reaction_tab, text="🎯 Reaction Time")
+        fun_nb.add(snake_tab,    text="🐍 Snake")
+        fun_nb.add(random_tab,   text="🎲 Random Tools")
+
+        cols = tk.Frame(skills_tab, bg=self.BG)
+        cols.pack(fill="both", expand=True, padx=4, pady=4)
+        self._build_typing_test_panel(cols)
+        self._build_cps_test_panel(cols)
+
+        self._build_reaction_test_panel(reaction_tab)
+        self._build_snake_game_panel(snake_tab)
+        self._build_random_tools_panel(random_tab)
+
+    # ── Typing Speed Test ──
+    def _build_typing_test_panel(self, cols):
+        """
+        Left-hand panel: a duration picker list (like the reference
+        screenshot) plus a live test area that streams a paragraph of
+        random words, coloring each one green (correct), red-strikethrough
+        (wrong), or dim gray (not yet typed) as the user types, with a
+        countdown timer that starts on the first keystroke.
+        """
+        left = tk.Frame(cols, bg=self.BG)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 8))
+
+        # Word pool the test paragraph is randomly generated from.
+        word_pool = (
+            "the be to of and a in that have I it for not on with he as you "
+            "do at this but his by from they we say her she or an will my "
+            "one all would there their what so up out if about who get which "
+            "go me when make can like time no just him know take people into "
+            "year your good some could them see other than then now look "
+            "only come its over think also back after use two how our work "
+            "first well way even new want because any these give day most us "
+            "gained moments fervor eyes success determination influence "
+            "community investors sheer money backgrounds dreamer young armed "
+            "family venture together sought early influence household"
+        ).split()
+
+        durations = [
+            ("Typing Speed Test", 15),   # quick default test
+            ("1 Minute Typing Test", 60),
+            ("2 Minute Typing Test", 120),
+            ("5 Minute Typing Test", 300),
+            ("7 Minute Typing Test", 420),
+            ("10 Minute Typing Test", 600),
+            ("15 Minute Typing Test", 900),
+        ]
+
+        # ── Collapsible duration picker (left column) ──
+        picker_frame = tk.LabelFrame(
+            left, text="  ⌨ Typing Test  ",
+            bg=self.BG2, fg=self.TEXT, font=("Segoe UI", 10, "bold"),
+            labelanchor="n", bd=1, relief="solid")
+        picker_frame.pack(fill="both", expand=True)
+
+        picker_buttons = {}
+
+        def _make_picker_row(label_text, seconds):
+            row = tk.Button(
+                picker_frame, text=f"⌨  {label_text}",
+                bg=self.BG2, fg=self.ACCENT2, activebackground=self.BG3,
+                activeforeground=self.ACCENT2, relief="flat", bd=0,
+                anchor="w", font=("Segoe UI", 9, "bold"), padx=14, pady=8,
+                cursor="hand2",
+                command=lambda: _start_test(seconds),
+            )
+            row.pack(fill="x", padx=6, pady=2)
+            picker_buttons[seconds] = row
+
+        for label_text, seconds in durations:
+            _make_picker_row(label_text, seconds)
+
+        # ── Test area (right side of this panel) ──
+        test_frame = tk.Frame(left, bg=self.BG2)
+        # not packed until a duration is picked — see _start_test
+
+        header_row = tk.Frame(test_frame, bg=self.BG2)
+        header_row.pack(fill="x", padx=14, pady=(12, 6))
+
+        test_title_label = tk.Label(header_row, text="",
+                                     bg=self.BG2, fg=self.TEXT,
+                                     font=("Segoe UI", 12, "bold"))
+        test_title_label.pack(side="left")
+
+        timer_frame = tk.Frame(header_row, bg=self.BG2)
+        timer_frame.pack(side="right")
+        tk.Label(timer_frame, text="🕐 Timer:", bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 4))
+        timer_label = tk.Label(timer_frame, text="0s", bg=self.BG2, fg=self.TEXT,
+                                font=("Segoe UI", 9, "bold"))
+        timer_label.pack(side="left")
+
+        text_display = tk.Text(
+            test_frame, bg=self.BG2, fg=self.TEXTDIM,
+            font=("Consolas", 13), wrap="word", height=8,
+            relief="flat", bd=0, cursor="arrow", padx=14, pady=10,
+            state="disabled", highlightthickness=0)
+        text_display.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+
+        # Tag styles for word coloring.
+        text_display.tag_configure("untyped", foreground=self.TEXTDIM)
+        text_display.tag_configure("current_untyped", foreground=self.TEXT,
+                                    underline=True)
+        text_display.tag_configure("correct", foreground=self.GREEN)
+        text_display.tag_configure("wrong", foreground=self.RED,
+                                    overstrike=True)
+        text_display.tag_configure("cursor", foreground=self.ACCENT2)
+
+        result_label = tk.Label(test_frame, text="",
+                                 bg=self.BG2, fg=self.ACCENT2,
+                                 font=("Segoe UI", 13, "bold"))
+        result_label.pack(pady=(0, 4))
+
+        # Hidden entry that actually captures keystrokes — the visible
+        # Text widget is read-only and only used for rendering. Since the
+        # Text widget (and the frame around it) can still steal focus when
+        # clicked even while disabled, clicking anywhere in the test area
+        # sends focus back to this hidden entry so typing never "goes
+        # nowhere".
+        capture_entry = tk.Entry(test_frame)
+        # Placed off-screen; still receives focus and key events normally.
+        capture_entry.place(x=-500, y=-500, width=1, height=1)
+
+        def _refocus_capture(event=None):
+            if typing_state["running"]:
+                capture_entry.focus_set()
+
+        text_display.bind("<Button-1>", _refocus_capture)
+        test_frame.bind("<Button-1>", _refocus_capture)
+        header_row.bind("<Button-1>", _refocus_capture)
+
+        typing_state = {
+            "words": [], "target_text": "", "duration": 15,
+            "start_time": None, "running": False, "timer_job": None,
+            "current_word_idx": 0,
+        }
+
+        def _generate_paragraph(min_words=60):
+            import random as _random
+            words = [_random.choice(word_pool) for _ in range(min_words)]
+            return words
+
+        def _render_words(typed_text):
+            """
+            Re-renders the whole word list with correct/wrong/untyped
+            coloring. The word currently being typed gets character-level
+            coloring (each typed character shown correct/wrong) plus an
+            underline and a blinking-style cursor bar at the exact typing
+            position, so the user always has a clear "you are here" marker.
+            """
+            text_display.configure(state="normal")
+            text_display.delete("1.0", "end")
+
+            typed_words = typed_text.split(" ")
+            words = typing_state["words"]
+            current_word_pos = len(typed_words) - 1
+
+            for i, word in enumerate(words):
+                if i < current_word_pos:
+                    # A fully committed word (user has moved past it).
+                    tag = "correct" if typed_words[i] == word else "wrong"
+                    text_display.insert("end", word, tag)
+                elif i == current_word_pos:
+                    # The word currently being typed — render character by
+                    # character so correct/wrong letters are visible as you
+                    # type, with a cursor bar right after the last typed
+                    # character.
+                    current_typed = typed_words[i]
+                    overlap = min(len(current_typed), len(word))
+
+                    for ci in range(overlap):
+                        tag = "correct" if current_typed[ci] == word[ci] else "wrong"
+                        text_display.insert("end", word[ci], tag)
+
+                    # Cursor bar sits right where typing currently is.
+                    text_display.insert("end", "\u2502", "cursor")
+
+                    if len(word) > overlap:
+                        # Remaining letters of the word not yet typed.
+                        text_display.insert("end", word[overlap:], "current_untyped")
+                    if len(current_typed) > overlap:
+                        # A typo that overshoots the word's length still
+                        # shows up, marked wrong, after the cursor.
+                        text_display.insert("end", current_typed[overlap:], "wrong")
+                else:
+                    text_display.insert("end", word, "untyped")
+                if i < len(words) - 1:
+                    text_display.insert("end", " ")
+
+            text_display.configure(state="disabled")
+            typing_state["current_word_idx"] = max(0, current_word_pos)
+
+            # Auto-scroll so the current word stays visible as the
+            # paragraph grows (relevant for the longer 10-15 minute tests).
+            text_display.see("end")
+
+        def _timer_tick():
+            if not typing_state["running"]:
+                return
+            elapsed = time.time() - typing_state["start_time"]
+            remaining = typing_state["duration"] - elapsed
+            if remaining <= 0:
+                _finish_test()
+                return
+            timer_label.configure(text=f"{remaining:.0f}s")
+            typing_state["timer_job"] = self.root.after(200, _timer_tick)
+
+        def _finish_test():
+            typing_state["running"] = False
+            if typing_state["timer_job"] is not None:
+                try:
+                    self.root.after_cancel(typing_state["timer_job"])
+                except Exception:
+                    pass
+            timer_label.configure(text="0s")
+
+            typed_text = capture_entry.get()
+            typed_words = typed_text.split(" ")
+            words = typing_state["words"]
+            correct_words = sum(
+                1 for i, w in enumerate(typed_words)
+                if i < len(words) and w == words[i]
+            )
+            elapsed_minutes = typing_state["duration"] / 60
+            wpm = correct_words / max(elapsed_minutes, 1 / 60)
+            accuracy = (correct_words / max(1, len(typed_words))) * 100
+
+            result_label.configure(
+                text=f"🎉 {wpm:.0f} WPM   •   {accuracy:.0f}% accuracy")
+            capture_entry.configure(state="disabled")
+            _play_chime([523.25, 659.25, 783.99], note_duration=0.1, volume=0.2)
+
+        def _on_typed(event=None):
+            if not typing_state["running"]:
+                return
+
+            if typing_state["start_time"] is None:
+                typing_state["start_time"] = time.time()
+                _timer_tick()
+
+            typed_text = capture_entry.get()
+            _render_words(typed_text)
+
+            # Once every generated word has been passed, extend with more
+            # random words so long tests (10-15 min) never run out.
+            typed_word_count = len(typed_text.split(" "))
+            if typed_word_count >= len(typing_state["words"]) - 5:
+                typing_state["words"].extend(_generate_paragraph(40))
+
+        def _start_test(seconds):
+            picker_frame.pack_forget()
+            test_frame.pack(fill="both", expand=True)
+
+            duration_label = next((d[0] for d in durations if d[1] == seconds),
+                                   "Typing Test")
+            test_title_label.configure(text=duration_label)
+            timer_label.configure(text=f"{seconds}s")
+            result_label.configure(text="")
+
+            typing_state["words"] = _generate_paragraph(80)
+            typing_state["duration"] = seconds
+            typing_state["start_time"] = None
+            typing_state["running"] = True
+
+            capture_entry.configure(state="normal")
+            capture_entry.delete(0, "end")
+            _render_words("")
+            capture_entry.focus_set()
+
+        def _reset_test():
+            if typing_state["timer_job"] is not None:
+                try:
+                    self.root.after_cancel(typing_state["timer_job"])
+                except Exception:
+                    pass
+            test_frame.pack_forget()
+            picker_frame.pack(fill="both", expand=True)
+            typing_state["running"] = False
+
+        capture_entry.bind("<KeyRelease>", _on_typed)
+        capture_entry.bind("<Return>", lambda e: "break")
+
+        back_btn = tk.Button(
+            test_frame, text="↺ Choose another test", bg=self.BG3, fg=self.TEXT,
+            activebackground=self.ACCENT, activeforeground="#fff",
+            relief="flat", bd=0, font=("Segoe UI", 9, "bold"),
+            cursor="hand2", command=_reset_test)
+        back_btn.pack(pady=(0, 10))
+
+    # ── CPS Test ──
+    def _build_cps_test_panel(self, cols):
+        """
+        Right-hand panel: a CPS (clicks-per-second) test with a selectable
+        duration. Once the timer runs out, the click button is disabled
+        for 3 seconds to prevent an accidental extra click from starting a
+        new run immediately.
+        """
+        cps_frame = tk.LabelFrame(cols, text="  🖱 CPS Test (Clicks Per Second)  ",
+                                   bg=self.BG2, fg=self.TEXT,
+                                   font=("Segoe UI", 10, "bold"),
+                                   labelanchor="n", bd=1, relief="solid")
+        cps_frame.pack(side="left", fill="both", expand=True, padx=(8, 0))
+
+        tk.Label(cps_frame, text="Choose a duration, then click as fast as you can.",
+                 bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 9), wraplength=220,
+                 justify="center").pack(pady=(14, 6))
+
+        # ── Duration selector ──
+        duration_var = tk.IntVar(value=5)
+        duration_row = tk.Frame(cps_frame, bg=self.BG2)
+        duration_row.pack(pady=(0, 10))
+
+        cps_duration_options = [1, 3, 5, 10, 30, 60]
+        duration_buttons = {}
+
+        def _select_duration(seconds):
+            duration_var.set(seconds)
+            for s, btn in duration_buttons.items():
+                if s == seconds:
+                    btn.configure(bg=self.ACCENT, fg="#ffffff")
+                else:
+                    btn.configure(bg=self.BG3, fg=self.TEXTDIM)
+
+        for seconds in cps_duration_options:
+            btn = tk.Button(
+                duration_row, text=f"{seconds}s",
+                bg=self.BG3, fg=self.TEXTDIM,
+                activebackground=self.ACCENT, activeforeground="#ffffff",
+                relief="flat", bd=0, font=("Segoe UI", 9, "bold"),
+                width=4, cursor="hand2",
+                command=lambda s=seconds: _select_duration(s),
+            )
+            btn.pack(side="left", padx=2)
+            duration_buttons[seconds] = btn
+        _select_duration(5)
+
+        cps_result_label = tk.Label(cps_frame, text="Ready",
+                                     bg=self.BG2, fg=self.ACCENT2,
+                                     font=("Segoe UI", 20, "bold"))
+        cps_result_label.pack(pady=(0, 8))
+
+        cps_state = {"clicks": 0, "running": False, "end_time": 0.0, "locked": False}
+
+        def _cps_tick():
+            if not cps_state["running"]:
+                return
+            remaining = cps_state["end_time"] - time.time()
+            if remaining <= 0:
+                cps_state["running"] = False
+                elapsed = duration_var.get()
+                cps = cps_state["clicks"] / elapsed
+                cps_result_label.configure(
+                    text=f"{cps:.2f} CPS", fg=self.GREEN)
+                _play_chime([523.25, 659.25, 783.99], note_duration=0.1, volume=0.2)
+                _lock_button_briefly()
+                return
+            cps_result_label.configure(
+                text=f"{cps_state['clicks']} clicks — {remaining:0.1f}s left",
+                fg=self.ACCENT2)
+            self.root.after(50, _cps_tick)
+
+        def _lock_button_briefly(seconds=3):
+            """
+            Disables the click button for a few seconds after a test ends,
+            so an accidental extra click right at 0s doesn't immediately
+            start a new run.
+            """
+            cps_state["locked"] = True
+            cps_button.configure(state="disabled")
+
+            def _tick_lock(remaining):
+                if remaining <= 0:
+                    cps_state["locked"] = False
+                    cps_button.configure(
+                        text="Click to start!", state="normal")
+                    for btn in duration_buttons.values():
+                        btn.configure(state="normal")
+                    return
+                cps_button.configure(text=f"Wait {remaining}s...")
+                self.root.after(1000, lambda: _tick_lock(remaining - 1))
+
+            _tick_lock(seconds)
+
+        def _cps_click():
+            if cps_state["locked"]:
+                return
+            if not cps_state["running"]:
+                cps_state["clicks"] = 0
+                cps_state["running"] = True
+                cps_state["end_time"] = time.time() + duration_var.get()
+                cps_button.configure(text="CLICK!")
+                for btn in duration_buttons.values():
+                    btn.configure(state="disabled")
+                _cps_tick()
+            else:
+                cps_state["clicks"] += 1
+
+        cps_button = tk.Button(
+            cps_frame, text="Click to start!",
+            bg=self.ACCENT, fg="#ffffff", activebackground=self.ACCENT2,
+            activeforeground="#ffffff", relief="flat", bd=0,
+            font=("Segoe UI", 11, "bold"), width=18, height=3,
+            cursor="hand2", command=_cps_click,
+        )
+        cps_button.pack(pady=(0, 16))
+
+    # ── Reaction Time Test ──
+    def _build_reaction_test_panel(self, parent):
+        """
+        Classic reaction time test: wait for the box to turn green, then
+        click as fast as possible. Clicking too early (while still red)
+        is called out and the round restarts. Keeps the best time across
+        rounds for the current session.
+        """
+        import random as _random
+
+        wrap = tk.Frame(parent, bg=self.BG)
+        wrap.pack(fill="both", expand=True, padx=20, pady=20)
+
+        tk.Label(wrap, text="Wait for the box to turn green, then click it as fast as you can.",
+                 bg=self.BG, fg=self.TEXTDIM, font=("Segoe UI", 9)).pack(pady=(0, 14))
+
+        state = {"phase": "idle", "wait_job": None, "start_time": 0.0, "best_ms": None}
+
+        box = tk.Label(wrap, text="Click to start", bg=self.BG3, fg=self.TEXT,
+                        font=("Segoe UI", 14, "bold"), width=32, height=8,
+                        cursor="hand2")
+        box.pack(pady=(0, 12))
+
+        result_label = tk.Label(wrap, text="Best: —", bg=self.BG, fg=self.ACCENT2,
+                                 font=("Segoe UI", 11, "bold"))
+        result_label.pack()
+
+        def _arm_round():
+            state["phase"] = "waiting"
+            box.configure(bg=self.RED, text="Wait for green...")
+            delay_ms = _random.randint(1500, 4000)
+
+            def _go_green():
+                state["phase"] = "ready"
+                state["start_time"] = time.time()
+                box.configure(bg=self.GREEN, text="CLICK NOW!")
+
+            state["wait_job"] = self.root.after(delay_ms, _go_green)
+
+        def _on_box_click(event=None):
+            phase = state["phase"]
+            if phase == "idle":
+                _arm_round()
+            elif phase == "waiting":
+                # Clicked too early — penalize and restart.
+                if state["wait_job"] is not None:
+                    try:
+                        self.root.after_cancel(state["wait_job"])
+                    except Exception:
+                        pass
+                box.configure(bg=self.RED, text="Too soon! Click to try again.")
+                state["phase"] = "idle"
+            elif phase == "ready":
+                elapsed_ms = (time.time() - state["start_time"]) * 1000
+                if state["best_ms"] is None or elapsed_ms < state["best_ms"]:
+                    state["best_ms"] = elapsed_ms
+                    result_label.configure(text=f"Best: {elapsed_ms:.0f} ms 🎉")
+                else:
+                    result_label.configure(text=f"Best: {state['best_ms']:.0f} ms")
+                box.configure(bg=self.BG3, text=f"{elapsed_ms:.0f} ms — click to try again")
+                state["phase"] = "idle"
+
+        box.bind("<Button-1>", _on_box_click)
+
+    # ── Snake Mini-Game ──
+    def _build_snake_game_panel(self, parent):
+        """
+        A small classic Snake game rendered on a Canvas grid. Arrow keys
+        change direction; the snake grows each time it eats a piece of
+        food, and the game ends on a wall or self collision. Speed
+        increases slightly as the score grows. Purely local — no saving,
+        no networking.
+        """
+        import random as _random
+
+        wrap = tk.Frame(parent, bg=self.BG)
+        wrap.pack(fill="both", expand=True, padx=20, pady=20)
+
+        GRID = 18
+        CELL = 20
+        CANVAS_SIZE = GRID * CELL
+
+        top_row = tk.Frame(wrap, bg=self.BG)
+        top_row.pack(fill="x", pady=(0, 8))
+        score_label = tk.Label(top_row, text="Score: 0", bg=self.BG, fg=self.TEXT,
+                                font=("Segoe UI", 11, "bold"))
+        score_label.pack(side="left")
+        best_label = tk.Label(top_row, text="Best: 0", bg=self.BG, fg=self.TEXTDIM,
+                               font=("Segoe UI", 10))
+        best_label.pack(side="right")
+
+        canvas = tk.Canvas(wrap, width=CANVAS_SIZE, height=CANVAS_SIZE,
+                            bg=self.BG2, highlightthickness=1,
+                            highlightbackground=self.BORDER)
+        canvas.pack()
+
+        hint_label = tk.Label(wrap, text="Click the board, then use arrow keys. Space to restart.",
+                               bg=self.BG, fg=self.TEXTDIM, font=("Segoe UI", 8))
+        hint_label.pack(pady=(6, 0))
+
+        state = {
+            "snake": [(9, 9), (8, 9), (7, 9)],
+            "direction": (1, 0),
+            "next_direction": (1, 0),
+            "food": (12, 9),
+            "score": 0,
+            "best": 0,
+            "running": False,
+            "job": None,
+        }
+
+        def _random_food():
+            while True:
+                pos = (_random.randint(0, GRID - 1), _random.randint(0, GRID - 1))
+                if pos not in state["snake"]:
+                    return pos
+
+        def _draw():
+            canvas.delete("all")
+            for i, (x, y) in enumerate(state["snake"]):
+                color = self.GREEN if i == 0 else self.ACCENT2
+                canvas.create_rectangle(
+                    x * CELL + 1, y * CELL + 1, x * CELL + CELL - 1, y * CELL + CELL - 1,
+                    fill=color, outline="")
+            fx, fy = state["food"]
+            canvas.create_oval(
+                fx * CELL + 3, fy * CELL + 3, fx * CELL + CELL - 3, fy * CELL + CELL - 3,
+                fill="#f0c060", outline="")
+
+        def _game_over():
+            state["running"] = False
+            if state["job"] is not None:
+                try:
+                    self.root.after_cancel(state["job"])
+                except Exception:
+                    pass
+            canvas.create_text(
+                CANVAS_SIZE // 2, CANVAS_SIZE // 2,
+                text="Game Over\nSpace to restart", fill=self.RED,
+                font=("Segoe UI", 13, "bold"), justify="center")
+            _play_chime([392.00, 329.63, 261.63], note_duration=0.12, volume=0.2)
+
+        def _tick():
+            if not state["running"]:
+                return
+            state["direction"] = state["next_direction"]
+            dx, dy = state["direction"]
+            hx, hy = state["snake"][0]
+            new_head = (hx + dx, hy + dy)
+
+            if (not (0 <= new_head[0] < GRID) or not (0 <= new_head[1] < GRID)
+                    or new_head in state["snake"]):
+                _game_over()
+                return
+
+            state["snake"].insert(0, new_head)
+            if new_head == state["food"]:
+                state["score"] += 1
+                score_label.configure(text=f"Score: {state['score']}")
+                state["food"] = _random_food()
+                _play_chime([523.25, 659.25], note_duration=0.06, volume=0.15)
+            else:
+                state["snake"].pop()
+
+            _draw()
+            speed_ms = max(60, 140 - state["score"] * 3)
+            state["job"] = self.root.after(speed_ms, _tick)
+
+        def _start_game():
+            state["snake"] = [(9, 9), (8, 9), (7, 9)]
+            state["direction"] = (1, 0)
+            state["next_direction"] = (1, 0)
+            state["food"] = _random_food()
+            state["score"] = 0
+            score_label.configure(text="Score: 0")
+            state["running"] = True
+            _draw()
+            if state["job"] is not None:
+                try:
+                    self.root.after_cancel(state["job"])
+                except Exception:
+                    pass
+            state["job"] = self.root.after(140, _tick)
+
+        def _on_key(event):
+            dx, dy = state["direction"]
+            key = event.keysym
+            if key == "space" or key == "Return":
+                if state["score"] > state["best"]:
+                    state["best"] = state["score"]
+                    best_label.configure(text=f"Best: {state['best']}")
+                _start_game()
+                return
+            new_dir = {
+                "Up": (0, -1), "Down": (0, 1),
+                "Left": (-1, 0), "Right": (1, 0),
+            }.get(key)
+            if new_dir is None:
+                return
+            # Prevent reversing directly into yourself.
+            if (new_dir[0], new_dir[1]) != (-dx, -dy):
+                state["next_direction"] = new_dir
+
+        def _on_canvas_click(event=None):
+            canvas.focus_set()
+            if not state["running"] and state["job"] is None:
+                _start_game()
+
+        canvas.bind("<Button-1>", _on_canvas_click)
+        canvas.bind("<KeyPress>", _on_key)
+        canvas.focus_set()
+
+        _draw()
+        canvas.create_text(
+            CANVAS_SIZE // 2, CANVAS_SIZE // 2,
+            text="Click to start\nArrow keys to move", fill=self.TEXTDIM,
+            font=("Segoe UI", 11, "bold"), justify="center")
+
+    # ── Random Tools (dice, coin flip, name picker) ──
+    def _build_random_tools_panel(self, parent):
+        """
+        A few small randomness-based tools: dice roller, coin flip, and a
+        random name/option picker for deciding between choices — handy for
+        stream giveaways or picking who goes first in something.
+        """
+        import random as _random
+
+        wrap = tk.Frame(parent, bg=self.BG)
+        wrap.pack(fill="both", expand=True, padx=16, pady=16)
+
+        cols = tk.Frame(wrap, bg=self.BG)
+        cols.pack(fill="both", expand=True)
+
+        # ── Dice Roller ──
+        dice_frame = tk.LabelFrame(cols, text="  🎲 Dice Roller  ",
+                                    bg=self.BG2, fg=self.TEXT,
+                                    font=("Segoe UI", 10, "bold"),
+                                    labelanchor="n", bd=1, relief="solid")
+        dice_frame.pack(side="left", fill="both", expand=True, padx=(0, 6))
+
+        dice_result = tk.Label(dice_frame, text="🎲", bg=self.BG2, fg=self.TEXT,
+                                font=("Segoe UI", 36))
+        dice_result.pack(pady=(16, 4))
+
+        dice_sides_var = tk.IntVar(value=6)
+        dice_row = tk.Frame(dice_frame, bg=self.BG2)
+        dice_row.pack(pady=(0, 8))
+        for sides in (4, 6, 8, 10, 12, 20):
+            tk.Radiobutton(
+                dice_row, text=f"d{sides}", variable=dice_sides_var, value=sides,
+                bg=self.BG2, fg=self.TEXTDIM, selectcolor=self.BG3,
+                activebackground=self.BG2, font=("Segoe UI", 8),
+            ).pack(side="left", padx=2)
+
+        def _roll_dice():
+            result = _random.randint(1, dice_sides_var.get())
+            dice_result.configure(text=str(result))
+            _play_chime([440.00, 554.37], note_duration=0.07, volume=0.15)
+
+        tk.Button(dice_frame, text="Roll", bg=self.ACCENT, fg="#ffffff",
+                  activebackground=self.ACCENT2, activeforeground="#ffffff",
+                  relief="flat", bd=0, font=("Segoe UI", 10, "bold"),
+                  width=14, cursor="hand2", command=_roll_dice,
+                  ).pack(pady=(0, 16))
+
+        # ── Coin Flip ──
+        coin_frame = tk.LabelFrame(cols, text="  🪙 Coin Flip  ",
+                                    bg=self.BG2, fg=self.TEXT,
+                                    font=("Segoe UI", 10, "bold"),
+                                    labelanchor="n", bd=1, relief="solid")
+        coin_frame.pack(side="left", fill="both", expand=True, padx=(6, 6))
+
+        coin_result = tk.Label(coin_frame, text="🪙", bg=self.BG2, fg=self.TEXT,
+                                font=("Segoe UI", 36))
+        coin_result.pack(pady=(16, 8))
+
+        coin_text_label = tk.Label(coin_frame, text="Flip to decide!",
+                                    bg=self.BG2, fg=self.TEXTDIM,
+                                    font=("Segoe UI", 10))
+        coin_text_label.pack(pady=(0, 8))
+
+        def _flip_coin():
+            outcome = _random.choice(["Heads", "Tails"])
+            coin_text_label.configure(text=outcome, fg=self.GREEN)
+            _play_chime([659.25, 523.25], note_duration=0.08, volume=0.15)
+
+        tk.Button(coin_frame, text="Flip", bg=self.ACCENT, fg="#ffffff",
+                  activebackground=self.ACCENT2, activeforeground="#ffffff",
+                  relief="flat", bd=0, font=("Segoe UI", 10, "bold"),
+                  width=14, cursor="hand2", command=_flip_coin,
+                  ).pack(pady=(0, 16))
+
+        # ── Random Picker ──
+        picker_frame = tk.LabelFrame(cols, text="  🎯 Random Picker  ",
+                                      bg=self.BG2, fg=self.TEXT,
+                                      font=("Segoe UI", 10, "bold"),
+                                      labelanchor="n", bd=1, relief="solid")
+        picker_frame.pack(side="left", fill="both", expand=True, padx=(6, 0))
+
+        tk.Label(picker_frame, text="One name/option per line:",
+                 bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8)).pack(pady=(12, 4))
+
+        picker_text = tk.Text(picker_frame, bg=self.BG3, fg=self.TEXT,
+                               font=("Segoe UI", 9), height=5, width=24,
+                               insertbackground=self.TEXT, relief="flat", bd=0)
+        picker_text.pack(padx=10, pady=(0, 8))
+
+        picker_result = tk.Label(picker_frame, text="",
+                                  bg=self.BG2, fg=self.GREEN,
+                                  font=("Segoe UI", 12, "bold"),
+                                  wraplength=200)
+        picker_result.pack(pady=(0, 4))
+
+        def _pick_random():
+            options = [line.strip() for line in picker_text.get("1.0", "end").split("\n")
+                       if line.strip()]
+            if not options:
+                picker_result.configure(text="Add some options first!", fg=self.RED)
+                return
+            winner = _random.choice(options)
+            picker_result.configure(text=f"🎉 {winner}", fg=self.GREEN)
+            _play_chime([523.25, 659.25, 783.99], note_duration=0.09, volume=0.2)
+
+        tk.Button(picker_frame, text="Pick Random", bg=self.ACCENT, fg="#ffffff",
+                  activebackground=self.ACCENT2, activeforeground="#ffffff",
+                  relief="flat", bd=0, font=("Segoe UI", 10, "bold"),
+                  width=16, cursor="hand2", command=_pick_random,
+                  ).pack(pady=(0, 16))
+
     # ── Background music ──
     def _on_music_track_change(self, track_name):
         """Called by MusicPlayer whenever the playing track changes."""
@@ -8500,6 +9976,9 @@ def _report_missing_libraries():
     if not _PYGAME_OK:
         missing.append(("pygame", "pip install pygame",
                          "Background music player"))
+    if not _PSUTIL_OK:
+        missing.append(("psutil", "pip install psutil",
+                         "CPU/RAM usage display and Lite Mode recommendation"))
 
     if not missing:
         return
@@ -8547,7 +10026,10 @@ if __name__ == '__main__':
     _update_splash(100, "Ready!")
     time.sleep(0.25)    # let the user see 100% for a moment
     if not APP_LITE_MODE:
-        _play_splash_outro_animation()   # animated "NEXOVATIVE" reveal (skipped in Lite Mode)
+        if APP_EXTENDED_INTRO:
+            _play_extended_intro_animation()   # ~8s full-screen cinematic intro
+        else:
+            _play_splash_outro_animation()     # short animated "NEXOVATIVE" reveal
     _close_splash()     # destroy splash Toplevel
     root.deiconify()    # NOW show the fully-built main window
     root.lift()
