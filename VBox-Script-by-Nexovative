@@ -44,7 +44,7 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & UPDATE CHECK =========================
-VERSION = "30.3.0"   # increment this with every release
+VERSION = "30.4.0"   # increment this with every release
 
 # Raw URL of version.json in your repo, and the page to send users to
 # when a newer version is available.
@@ -136,6 +136,7 @@ _splash_spinner_angle  = 0      # current rotation angle of the spinner, in degr
 _host_root     = None   # the one-and-only tk.Tk() instance (kept hidden during splash)
 APP_LITE_MODE  = False  # True = Lite Mode (fewer widgets, slower polling, for weaker PCs)
 APP_EXTENDED_INTRO = False   # True = play the ~8s full-screen intro animation instead of the short one
+SELECTED_MONITOR = None   # dict {"left","top","width","height"} of the monitor the user picked, or None if only one monitor exists
 
 STARTUP_PREFS_FILE = "startup_prefs.json"
 
@@ -159,6 +160,115 @@ def _save_startup_prefs(prefs: dict):
             _json.dump(prefs, f, indent=2)
     except Exception as e:
         print(f"[Startup] Could not save {STARTUP_PREFS_FILE}: {e}")
+
+
+def _detect_monitors():
+    """
+    Returns a list of dicts describing every connected monitor:
+    {"left": int, "top": int, "width": int, "height": int, "is_primary": bool}
+    Uses ctypes + the Windows EnumDisplayMonitors API, so no extra
+    dependency is required. Returns a single-item list on failure or on
+    non-Windows systems, so callers can always treat the result the same way.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        monitors = []
+
+        MONITORENUMPROC = ctypes.WINFUNCTYPE(
+            ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
+            ctypes.POINTER(wintypes.RECT), ctypes.c_double
+        )
+
+        def _callback(hMonitor, hdcMonitor, lprcMonitor, dwData):
+            r = lprcMonitor.contents
+            monitors.append({
+                "left": r.left, "top": r.top,
+                "width": r.right - r.left, "height": r.bottom - r.top,
+                "is_primary": (r.left == 0 and r.top == 0),
+            })
+            return 1
+
+        ctypes.windll.user32.EnumDisplayMonitors(
+            0, 0, MONITORENUMPROC(_callback), 0
+        )
+
+        if monitors:
+            return monitors
+    except Exception as e:
+        print(f"[Startup] Monitor detection failed, assuming single monitor: {e}")
+
+    return [{"left": 0, "top": 0, "width": 800, "height": 600, "is_primary": True}]
+
+
+def _ask_monitor_choice(monitors):
+    """
+    Shown before the Lite/Full GUI mode dialog, only if more than one
+    monitor was detected. Lets the user pick which monitor the app's
+    windows (splash, dialogs, and the main window) should appear on.
+    Sets the global SELECTED_MONITOR and returns nothing.
+    """
+    global SELECTED_MONITOR
+
+    if len(monitors) <= 1:
+        SELECTED_MONITOR = monitors[0] if monitors else None
+        return
+
+    dlg = tk.Toplevel(_host_root)
+    dlg.title("")
+    dlg.resizable(False, False)
+    dlg.overrideredirect(True)
+    W, H = 460, 120 + 46 * len(monitors)
+    sw = dlg.winfo_screenwidth()
+    sh = dlg.winfo_screenheight()
+    x = (sw - W) // 2
+    y = (sh - H) // 2
+    dlg.geometry(f"{W}x{H}+{x}+{y}")
+    dlg.configure(bg="#0f0f1a")
+
+    border = tk.Frame(dlg, bg="#7c5cbf", padx=2, pady=2)
+    border.place(relx=0, rely=0, relwidth=1, relheight=1)
+    inner = tk.Frame(border, bg="#0f0f1a")
+    inner.pack(fill="both", expand=True)
+
+    tk.Label(inner, text="Choose a Monitor",
+             bg="#0f0f1a", fg="#ffffff",
+             font=("Segoe UI", 15, "bold")).pack(pady=(20, 4))
+
+    tk.Label(inner,
+             text=f"{len(monitors)} monitors detected. Pick where the app should open.",
+             bg="#0f0f1a", fg="#aaaaaa",
+             font=("Segoe UI", 9), justify="center").pack(pady=(0, 12))
+
+    result = {"monitor": monitors[0]}
+
+    def _choose(mon):
+        result["monitor"] = mon
+        dlg.destroy()
+
+    for i, mon in enumerate(monitors):
+        label = f"Monitor {i + 1}  —  {mon['width']}x{mon['height']}"
+        if mon.get("is_primary"):
+            label += "  (Primary)"
+        tk.Button(
+            inner, text=label,
+            bg="#1e1e2e", fg="#3ddc97", activebackground="#2a2a3e",
+            activeforeground="#3ddc97", relief="flat", bd=0,
+            font=("Segoe UI", 9, "bold"), justify="center",
+            width=36, height=1, cursor="hand2",
+            command=lambda mon=mon: _choose(mon),
+        ).pack(pady=(0, 6))
+
+    dlg.lift()
+    dlg.attributes("-topmost", True)
+    dlg.focus_force()
+    dlg.update()
+
+    dlg.wait_window(dlg)
+
+    SELECTED_MONITOR = result["monitor"]
+    print(f"[Startup] Monitor selected: {SELECTED_MONITOR}")
 
 
 def _ask_startup_mode():
@@ -327,6 +437,9 @@ def _create_splash():
     _host_root = tk.Tk()
     _host_root.withdraw()
 
+    monitors = _detect_monitors()
+    _ask_monitor_choice(monitors)   # only actually prompts if more than one monitor was found
+
     _ask_startup_mode()   # user picks Full GUI vs Lite Mode before anything else loads
 
     W, H = 480, 240
@@ -335,10 +448,15 @@ def _create_splash():
     splash.title("")
     splash.resizable(False, False)
     splash.overrideredirect(True)          # borderless window
-    sw = splash.winfo_screenwidth()
-    sh = splash.winfo_screenheight()
-    x  = (sw - W) // 2
-    y  = (sh - H) // 2
+    if SELECTED_MONITOR:
+        sw, sh = SELECTED_MONITOR["width"], SELECTED_MONITOR["height"]
+        mx, my = SELECTED_MONITOR["left"], SELECTED_MONITOR["top"]
+    else:
+        sw = splash.winfo_screenwidth()
+        sh = splash.winfo_screenheight()
+        mx, my = 0, 0
+    x  = mx + (sw - W) // 2
+    y  = my + (sh - H) // 2
     splash.geometry(f"{W}x{H}+{x}+{y}")
     splash.configure(bg="#0f0f1a")
 
@@ -1122,6 +1240,8 @@ except ImportError:
 import http.server
 import socketserver
 import json
+import urllib.request
+import urllib.error
 from tkinter import ttk, scrolledtext, messagebox
 
 _update_splash(65, "Importing tray & notification libraries...")
@@ -1144,7 +1264,7 @@ except ImportError:
 
 try:
     import pyautogui
-    pyautogui.FAILSAFE   = True   # move mouse to top-left corner to abort
+    pyautogui.FAILSAFE   = False  # off by default — moving the mouse to a screen corner (e.g. via !move) no longer aborts the script
     pyautogui.PAUSE      = 0.05   # small delay between actions for stability
     _PYAUTOGUI_OK = True
 except ImportError:
@@ -1515,7 +1635,7 @@ REALPC_CONFIG_FILE = "realpc_config.json"
 REALPC_CONFIG = {
     "video_id":          "",       # YouTube video ID to listen on
     "enabled":           False,    # master on/off switch
-    "failsafe":          True,     # pyautogui failsafe (mouse to corner = abort)
+    "failsafe":          False,    # pyautogui failsafe (mouse to corner = abort) — off by default
     "action_delay":      0.05,     # seconds between pyautogui calls
     "cooldown":          1.0,      # per-user cooldown in seconds
     "whitelist_only":    False,    # only allow whitelisted users
@@ -1910,7 +2030,27 @@ def _realpc_execute(username: str, action: str, args: str):
                 pyautogui.doubleClick()
             _append_event("REALPC_CMD", username, f"dclick {args.strip()}")
 
-        elif action in ("move", "moveto", "abs", "cursor", "moveabs"):
+        elif action == "move":
+            if not allowed.get("mouse", True):
+                return
+            direction = args.strip().lower()
+            step = REALPC_CONFIG.get("mouse_step", 50)
+            dx, dy = 0, 0
+            if   direction in ("up",    "u"): dy = -step
+            elif direction in ("down",  "d"): dy =  step
+            elif direction in ("left",  "l"): dx = -step
+            elif direction in ("right", "r"): dx =  step
+
+            if dx or dy:
+                pyautogui.moveRel(dx, dy, duration=0.15)
+                _append_event("REALPC_CMD", username, f"move {direction}")
+            else:
+                nums = _parse_two_ints(args)
+                if nums:
+                    pyautogui.moveTo(nums[0], nums[1], duration=0.2)
+                    _append_event("REALPC_CMD", username, f"move {nums[0]} {nums[1]}")
+
+        elif action in ("moveto", "abs", "cursor", "moveabs"):
             if not allowed.get("mouse", True):
                 return
             nums = _parse_two_ints(args)
@@ -2013,7 +2153,7 @@ def _realpc_bot_loop():
     whitelist = {normalize_username(u) for u in REALPC_CONFIG.get("whitelist", [])}
     blocked   = {normalize_username(u) for u in REALPC_CONFIG.get("blocked",   [])}
 
-    pyautogui.FAILSAFE = REALPC_CONFIG.get("failsafe", True)
+    pyautogui.FAILSAFE = REALPC_CONFIG.get("failsafe", False)
     pyautogui.PAUSE    = REALPC_CONFIG.get("action_delay", 0.05)
 
     _realpc_set_status(f"Connecting to stream: {vid}")
@@ -2229,6 +2369,144 @@ def play_event_sound(event_key: str):
         except Exception as err:
             print(f"[Sound] Error playing '{sound_file}': {err}")
     threading.Thread(target=_play, daemon=True).start()
+
+# ========================= NEXOAI (GROQ CHAT) CONFIG =========================
+NEXOAI_CONFIG_FILE = "nexoai_config.json"
+NEXOAI_CONFIG_DEFAULT_PROMPT = (
+    "You are NexoAI, the built-in AI assistant of Nexovative Control Center "
+    "(a YouTube livestream chat-bot / VirtualBox control app). You run on "
+    "Groq's LPU infrastructure. Introduce yourself as NexoAI if asked who "
+    "you are, and don't claim to be ChatGPT, Gemini, or any other assistant. "
+    "Be concise, friendly, and helpful."
+)
+NEXOAI_CONFIG = {
+    "groq_api_key": "",                        # saved once entered, never shown again in plain sight after restart
+    "model":        "llama-3.3-70b-versatile",  # default Groq model
+    "system_prompt": NEXOAI_CONFIG_DEFAULT_PROMPT,
+}
+GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODELS_URL           = "https://api.groq.com/openai/v1/models"
+
+# urllib's default "Python-urllib/x.y" User-Agent gets blocked by Cloudflare
+# (which fronts api.groq.com) as an automated-request signature — that's
+# Cloudflare error 1010, not an actual Groq/API-key problem. Sending a
+# normal browser-style User-Agent avoids it.
+GROQ_REQUEST_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"),
+    "Accept": "application/json",
+}
+
+# A reasonable, hand-maintained fallback list — used if we can't reach
+# Groq's /models endpoint (e.g. no key yet, or offline) so the dropdown
+# is never empty.
+NEXOAI_FALLBACK_MODELS = [
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "llama3-70b-8192",
+    "llama3-8b-8192",
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it",
+]
+
+
+def load_nexoai_config():
+    global NEXOAI_CONFIG
+    try:
+        if os.path.exists(NEXOAI_CONFIG_FILE):
+            with open(NEXOAI_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            NEXOAI_CONFIG.update(data)
+            print("[NexoAI] Config loaded.")
+    except Exception as e:
+        print(f"[NexoAI] Load error: {e}")
+
+
+def save_nexoai_config():
+    try:
+        with open(NEXOAI_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(NEXOAI_CONFIG, f, indent=2)
+        print("[NexoAI] Config saved.")
+    except Exception as e:
+        print(f"[NexoAI] Save error: {e}")
+
+
+def groq_list_models(api_key: str):
+    """
+    Fetches the list of available model IDs from Groq's /models endpoint.
+    Returns a list of model id strings, or the fallback list on any error
+    (bad key, no internet, endpoint change, etc.) so the caller never has
+    to special-case failure.
+    """
+    if not api_key:
+        return list(NEXOAI_FALLBACK_MODELS)
+    try:
+        req = urllib.request.Request(
+            GROQ_MODELS_URL,
+            headers={**GROQ_REQUEST_HEADERS, "Authorization": f"Bearer {api_key}"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        ids = [m.get("id") for m in data.get("data", []) if m.get("id")]
+        return sorted(ids) if ids else list(NEXOAI_FALLBACK_MODELS)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        try:
+            detail = json.loads(body).get("error", {}).get("message", body)
+        except Exception:
+            detail = body
+        print(f"[NexoAI] Could not fetch model list (HTTP {e.code}): {detail} — using fallback list.")
+        return list(NEXOAI_FALLBACK_MODELS)
+    except Exception as e:
+        print(f"[NexoAI] Could not fetch model list, using fallback list: {e}")
+        return list(NEXOAI_FALLBACK_MODELS)
+
+
+def groq_chat_completion(api_key: str, model: str, messages: list):
+    """
+    Sends a chat completion request to Groq (OpenAI-compatible endpoint).
+    messages: list of {"role": "user"/"assistant"/"system", "content": str}
+    Returns the assistant's reply text.
+    Raises an exception on any failure — the caller is expected to catch
+    it and show the message to the user.
+    """
+    if not api_key:
+        raise ValueError("No Groq API key set. Enter one in the NexoAI tab first.")
+
+    payload = json.dumps({
+        "model":    model,
+        "messages": messages,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        GROQ_CHAT_COMPLETIONS_URL,
+        data=payload,
+        method="POST",
+        headers={
+            **GROQ_REQUEST_HEADERS,
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type":  "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        try:
+            body_json = json.loads(body)
+            detail = body_json.get("error", {}).get("message", body)
+        except Exception:
+            detail = body
+        raise ValueError(f"Groq API error (HTTP {e.code}): {detail}") from None
+
+    choices = data.get("choices", [])
+    if not choices:
+        raise ValueError(f"Groq returned no response: {data}")
+    return choices[0]["message"]["content"]
+
+
 
 # ========================= MULTI-STREAM CONFIG =========================
 MULTI_STREAM_CONFIG_FILE = "multi_stream_config.json"
@@ -4196,6 +4474,15 @@ class NexovativeControlCenter:
         self.root.title("🤖 Nexovative Control Center")
         self.root.configure(bg=self.BG)
         self.root.resizable(True, True)
+
+        # If the user picked a non-primary monitor, move the window there
+        # first — "zoomed" maximizes on whichever monitor the window
+        # currently overlaps, so the move has to happen before that.
+        if SELECTED_MONITOR and not SELECTED_MONITOR.get("is_primary"):
+            mx, my = SELECTED_MONITOR["left"], SELECTED_MONITOR["top"]
+            self.root.geometry(f"900x600+{mx + 20}+{my + 20}")
+            self.root.update_idletasks()
+
         # Open maximized (windowed fullscreen — not borderless, still has taskbar/titlebar)
         self.root.state("zoomed")
         self.root.minsize(900, 600)
@@ -4227,6 +4514,7 @@ class NexovativeControlCenter:
         load_multi_stream_config()
         load_scheduler_config()
         load_custom_commands()
+        load_nexoai_config()
         self._build_ui()
         self._setup_konami_code_listener()
 
@@ -4501,6 +4789,7 @@ class NexovativeControlCenter:
         tab13 = ttk.Frame(nb)
         tab14 = ttk.Frame(nb)
         tab15 = ttk.Frame(nb)
+        tab16 = ttk.Frame(nb)
         nb.add(tab1,  text="▶ Main")
         nb.add(tab2,  text="⚙ Cmds")
         nb.add(tab3,  text="🖥 VM")
@@ -4516,6 +4805,7 @@ class NexovativeControlCenter:
         nb.add(tab13, text="📅 Sched")
         nb.add(tab14, text="🖱 Real PC")
         nb.add(tab15, text="🔄 Reconnect")
+        nb.add(tab16, text="🤖 NexoAI")
         self._fun_tab_anchor = tab15   # hidden Fun tab (easter egg) is inserted right before this one
 
         if not APP_LITE_MODE:
@@ -4535,6 +4825,7 @@ class NexovativeControlCenter:
             self._build_scheduler_tab(tab13)
             self._build_realpc_tab(tab14)
             self._build_reconnect_tab(tab15)
+            self._build_nexoai_tab(tab16)
         else:
             # ── Lite Mode: ULTRA — only the tab currently being viewed is
             # ever built. Main, VM controls, and Real PC stay built (they're
@@ -4560,6 +4851,7 @@ class NexovativeControlCenter:
                 tab12: self._build_multi_stream_tab,
                 tab13: self._build_scheduler_tab,
                 tab15: self._build_reconnect_tab,
+                tab16: self._build_nexoai_tab,
             }
             # Maps tab index -> the frame's own "unsaved changes" save
             # function, so we can offer to save before tearing a tab down.
@@ -7730,7 +8022,7 @@ class NexovativeControlCenter:
 
         # Failsafe
         self._rpc_failsafe_var = tk.BooleanVar(
-            value=REALPC_CONFIG.get("failsafe", True))
+            value=REALPC_CONFIG.get("failsafe", False))
         tk.Checkbutton(settings_card,
                        text="Enable pyautogui failsafe  "
                             "(move mouse to top-left corner to instantly stop all actions)",
@@ -8313,6 +8605,233 @@ class NexovativeControlCenter:
                                           bg=self.BG, fg=self.GREEN,
                                           font=("Segoe UI", 9))
         self._reconn_saved_lbl.pack(anchor="w", padx=16, pady=(4, 0))
+
+    def _build_nexoai_tab(self, parent):
+        """
+        NexoAI tab — chat with Groq-hosted LLMs directly from the app.
+        The Groq API key is entered once, saved to nexoai_config.json, and
+        reused automatically on every future launch.
+        """
+        outer = tk.Frame(parent, bg=self.BG)
+        outer.pack(fill="both", expand=True)
+
+        # ── API key + model card ──
+        setup_card = ttk.Frame(outer, style="Card.TFrame", padding=14)
+        setup_card.pack(fill="x", padx=12, pady=(12, 6))
+
+        tk.Label(setup_card, text="Groq API Key",
+                 bg=self.BG2, fg=self.ACCENT,
+                 font=("Segoe UI", 10, "bold")).grid(
+                 row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+
+        self._nexoai_key_var = tk.StringVar(value=NEXOAI_CONFIG.get("groq_api_key", ""))
+        self._nexoai_key_entry = ttk.Entry(
+            setup_card, textvariable=self._nexoai_key_var,
+            width=44, font=("Segoe UI", 9), show="•")
+        self._nexoai_key_entry.grid(row=1, column=0, columnspan=2, sticky="ew",
+                                     padx=(0, 6), ipady=3)
+
+        self._nexoai_key_visible = False
+
+        def _toggle_key_visibility():
+            self._nexoai_key_visible = not self._nexoai_key_visible
+            self._nexoai_key_entry.configure(show="" if self._nexoai_key_visible else "•")
+            show_btn.configure(text="🙈 Hide" if self._nexoai_key_visible else "👁 Show")
+
+        show_btn = ttk.Button(setup_card, text="👁 Show", style="Dim.TButton",
+                               command=_toggle_key_visibility)
+        show_btn.grid(row=1, column=2, padx=(0, 6))
+
+        ttk.Button(setup_card, text="💾 Save Key", style="Green.TButton",
+                   command=self._nexoai_save_key).grid(row=1, column=3)
+
+        tk.Label(setup_card,
+                 text="Saved locally in nexoai_config.json — entered once, reused on every launch. "
+                      "Get a free key at console.groq.com/keys",
+                 bg=self.BG2, fg=self.TEXTDIM,
+                 font=("Segoe UI", 8), justify="left").grid(
+                 row=2, column=0, columnspan=4, sticky="w", pady=(4, 10))
+
+        tk.Label(setup_card, text="Model:", bg=self.BG2, fg=self.TEXT,
+                 font=("Segoe UI", 9)).grid(row=3, column=0, sticky="w", padx=(0, 8))
+
+        self._nexoai_model_var = tk.StringVar(value=NEXOAI_CONFIG.get("model", NEXOAI_FALLBACK_MODELS[0]))
+        self._nexoai_model_combo = ttk.Combobox(
+            setup_card, textvariable=self._nexoai_model_var,
+            values=NEXOAI_FALLBACK_MODELS, width=32,
+            font=("Segoe UI", 9), state="readonly")
+        self._nexoai_model_combo.grid(row=3, column=1, sticky="w")
+        self._nexoai_model_combo.bind("<<ComboboxSelected>>",
+                                       lambda e: self._nexoai_save_model())
+
+        ttk.Button(setup_card, text="🔄 Refresh Models", style="Dim.TButton",
+                   command=self._nexoai_refresh_models).grid(row=3, column=2, padx=(6, 0))
+
+        self._nexoai_model_status = tk.Label(setup_card, text="", bg=self.BG2,
+                                              fg=self.TEXTDIM, font=("Segoe UI", 8))
+        self._nexoai_model_status.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
+        setup_card.columnconfigure(1, weight=1)
+
+        # ── Chat card ──
+        chat_card = ttk.Frame(outer, style="Card.TFrame", padding=14)
+        chat_card.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        tk.Label(chat_card, text="Chat",
+                 bg=self.BG2, fg=self.ACCENT,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 6))
+
+        # Input row is packed FIRST and anchored to the bottom, so it always
+        # stays visible; the chat history frame is packed after and fills
+        # whatever space remains above it. (Packing order matters here —
+        # an expand=True widget packed first would claim all the space and
+        # push a later side="bottom" widget out of view.)
+        input_row = tk.Frame(chat_card, bg=self.BG2)
+        input_row.pack(side="bottom", fill="x", pady=(8, 0))
+
+        self._nexoai_input_var = tk.StringVar()
+        nexoai_entry = ttk.Entry(input_row, textvariable=self._nexoai_input_var,
+                                  font=("Segoe UI", 10))
+        nexoai_entry.pack(side="left", fill="x", expand=True, ipady=4, padx=(0, 6))
+        nexoai_entry.bind("<Return>", lambda e: self._nexoai_send())
+
+        self._nexoai_send_btn = ttk.Button(input_row, text="Send ➤", style="Accent.TButton",
+                                            command=self._nexoai_send)
+        self._nexoai_send_btn.pack(side="left", padx=(0, 6))
+
+        ttk.Button(input_row, text="🗑 Clear Chat", style="Dim.TButton",
+                   command=self._nexoai_clear_chat).pack(side="left")
+
+        chat_frame = tk.Frame(chat_card, bg=self.BORDER, bd=1)
+        chat_frame.pack(fill="both", expand=True)
+        self._nexoai_chat_view = scrolledtext.ScrolledText(
+            chat_frame,
+            bg=self.CONSOLE, fg=self.TEXT,
+            font=("Segoe UI", 10),
+            insertbackground=self.TEXT,
+            selectbackground=self.ACCENT,
+            relief="flat", bd=0, state="disabled", wrap="word")
+        self._nexoai_chat_view.pack(fill="both", expand=True, padx=1, pady=1)
+        self._nexoai_chat_view.tag_config("user_tag", foreground=self.ACCENT2, font=("Segoe UI", 10, "bold"))
+        self._nexoai_chat_view.tag_config("ai_tag", foreground=self.GREEN, font=("Segoe UI", 10, "bold"))
+        self._nexoai_chat_view.tag_config("err_tag", foreground=self.RED)
+
+        self._nexoai_history = []   # list of {"role":.., "content":..} sent to Groq for context
+        self._nexoai_busy = False
+
+
+        # If a key is already saved, quietly refresh the model list in the
+        # background so the dropdown reflects what's actually available.
+        if NEXOAI_CONFIG.get("groq_api_key"):
+            self._nexoai_refresh_models(silent=True)
+
+    def _nexoai_safe_after(self, callback):
+        """
+        Like self.root.after(0, callback), but tolerates the app having
+        already closed. Background NexoAI requests run in daemon threads
+        and can finish after the user closes the window / the Tk main
+        loop has exited — calling root.after() at that point raises
+        RuntimeError: main thread is not in main loop. That's not a real
+        bug (there's simply no UI left to update), so we just drop the
+        update instead of crashing the thread with a traceback.
+        """
+        try:
+            self.root.after(0, callback)
+        except RuntimeError:
+            pass
+
+    def _nexoai_append_chat(self, who: str, text: str, tag: str):
+        self._nexoai_chat_view.configure(state="normal")
+        self._nexoai_chat_view.insert("end", f"{who}: ", tag)
+        self._nexoai_chat_view.insert("end", f"{text}\n\n")
+        self._nexoai_chat_view.configure(state="disabled")
+        self._nexoai_chat_view.see("end")
+
+    def _nexoai_clear_chat(self):
+        self._nexoai_history = []
+        self._nexoai_chat_view.configure(state="normal")
+        self._nexoai_chat_view.delete("1.0", "end")
+        self._nexoai_chat_view.configure(state="disabled")
+
+    def _nexoai_save_key(self):
+        key = self._nexoai_key_var.get().strip()
+        NEXOAI_CONFIG["groq_api_key"] = key
+        save_nexoai_config()
+        if key:
+            messagebox.showinfo("NexoAI", "Groq API key saved. It will be reused automatically next time you open the app.")
+            self._nexoai_refresh_models(silent=True)
+        else:
+            messagebox.showinfo("NexoAI", "API key cleared.")
+
+    def _nexoai_save_model(self):
+        NEXOAI_CONFIG["model"] = self._nexoai_model_var.get().strip()
+        save_nexoai_config()
+
+    def _nexoai_refresh_models(self, silent: bool = False):
+        key = self._nexoai_key_var.get().strip()
+        if not silent:
+            self._nexoai_model_status.configure(text="Fetching model list...", fg=self.TEXTDIM)
+
+        def _work():
+            models = groq_list_models(key)
+
+            def _apply():
+                current = self._nexoai_model_var.get()
+                self._nexoai_model_combo.configure(values=models)
+                if current not in models and models:
+                    self._nexoai_model_var.set(models[0])
+                    NEXOAI_CONFIG["model"] = models[0]
+                    save_nexoai_config()
+                if not silent:
+                    self._nexoai_model_status.configure(
+                        text=f"{len(models)} model(s) available.", fg=self.GREEN)
+            self._nexoai_safe_after(_apply)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _nexoai_send(self):
+        if self._nexoai_busy:
+            return
+        text = self._nexoai_input_var.get().strip()
+        if not text:
+            return
+
+        key = self._nexoai_key_var.get().strip()
+        if not key:
+            messagebox.showwarning("NexoAI", "Enter and save your Groq API key first.")
+            return
+
+        model = self._nexoai_model_var.get().strip() or NEXOAI_FALLBACK_MODELS[0]
+
+        self._nexoai_input_var.set("")
+        self._nexoai_append_chat("You", text, "user_tag")
+        self._nexoai_history.append({"role": "user", "content": text})
+
+        self._nexoai_busy = True
+        self._nexoai_send_btn.configure(state="disabled")
+
+        def _work():
+            try:
+                messages = [{"role": "system", "content": NEXOAI_CONFIG.get("system_prompt", NEXOAI_CONFIG_DEFAULT_PROMPT)}]
+                messages.extend(self._nexoai_history[-20:])   # keep last 20 turns of context
+                reply = groq_chat_completion(key, model, messages)
+            except Exception as e:
+                reply = None
+                error = str(e)
+            else:
+                error = None
+
+            def _apply():
+                self._nexoai_busy = False
+                self._nexoai_send_btn.configure(state="normal")
+                if error:
+                    self._nexoai_append_chat("Error", error, "err_tag")
+                else:
+                    self._nexoai_history.append({"role": "assistant", "content": reply})
+                    self._nexoai_append_chat("NexoAI", reply, "ai_tag")
+            self._nexoai_safe_after(_apply)
+
+        threading.Thread(target=_work, daemon=True).start()
 
     def _root_after_reconnect_poll(self):
         """Poll the bot's reconnect failure count and update the status label."""
@@ -10015,6 +10534,7 @@ if __name__ == '__main__':
     load_scheduler_config()
     load_realpc_config()
     load_reconnect_config()
+    load_nexoai_config()
     _update_splash(97, "Building interface...")
 
     # Reuse the hidden host root that was created alongside the splash.
