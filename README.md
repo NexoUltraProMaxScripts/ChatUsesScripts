@@ -6,5 +6,5 @@
 
 **Download VirtualBox: https://www.virtualbox.org/wiki/Downloads**
 
-*pip install pytchat pywin32 vncdotool plyer pystray obsws-python pygame psutil*
+*pip install psutil pytchat pywin32 pystray pillow pyautogui pygame obsws-python*
 
