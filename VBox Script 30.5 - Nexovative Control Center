@@ -44,7 +44,7 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & UPDATE CHECK =========================
-VERSION = "30.4.0"   # increment this with every release
+VERSION = "30.5.0"   # increment this with every release
 
 # Raw URL of version.json in your repo, and the page to send users to
 # when a newer version is available.
@@ -1774,6 +1774,15 @@ _REALPC_DANGEROUS_TEXT_PATTERNS = [
     "sudoinit0", "sudoinit6", "telinit0", "telinit6",
     # Generic dangerous download/exec chains
     "curlhttp", "wgethttp", "curl-o", "wget-o", "curl-s", "|bash", "|sh",
+    # Base64 decode-to-file primitives — the actual "no internet needed"
+    # vector: the payload (e.g. an image) is embedded as base64 text
+    # directly in the typed command, then decoded straight to a file and
+    # opened. None of this touches the network, so it's invisible to any
+    # filter that only looks for download/exec commands.
+    "frombase64string", "convert::frombase64string",
+    "writeallbytes", "io.file::writeallbytes", "[io.file]::writeallbytes",
+    "set-contentencoding", "-encodingbyte", "out-fileencoding",
+    "certutil-decode", "certreq-decode",
 ]
 
 # Single keys that are dangerous as a standalone !key / !press regardless of
@@ -1790,7 +1799,21 @@ _REALPC_DANGEROUS_KEYS = {
 
 _realpc_typing_buffers = {}          # {username: "current simulated text"}
 _realpc_typing_buffer_lock = threading.Lock()
-_REALPC_BUFFER_MAX_LEN = 200         # hard cap so buffers can't grow unbounded
+# A real image, even a tiny one, needs hundreds to thousands of base64
+# characters — far more than the old 200-char cap kept around, which meant
+# a long base64 payload would get truncated out of the buffer before the
+# scan below ever saw the whole thing. Raised so the base64 heuristic
+# actually has something to catch.
+_REALPC_BUFFER_MAX_LEN = 4000
+
+# Any unbroken run of base64-alphabet characters at least this long is
+# treated as a payload blob and blocked outright, regardless of which
+# tool would go on to decode it (certutil, PowerShell, python, etc.).
+# There is no legitimate reason a chat-issued PC command needs a 60+
+# character run of pure base64 — real commands, paths, and URLs always
+# mix in spaces, slashes, or other separators well before that length.
+_REALPC_BASE64_BLOB_MIN_LEN = 60
+_REALPC_BASE64_BLOB_RE = re.compile(r"[A-Za-z0-9+/]{%d,}={0,2}" % _REALPC_BASE64_BLOB_MIN_LEN)
 
 
 def _realpc_buffer_get(username: str) -> str:
@@ -1808,17 +1831,42 @@ def _realpc_buffer_reset(username: str):
         _realpc_typing_buffers[username] = ""
 
 
+def _realpc_looks_like_base64(candidate: str) -> bool:
+    """
+    True if `candidate` has the statistical signature of base64-encoded
+    binary data: a genuine mix of uppercase, lowercase, AND digits packed
+    together. Concatenated natural-language text (which is what you get
+    after stripping spaces from a long typed sentence) is overwhelmingly
+    lowercase with very few digits and essentially never mixes case
+    mid-word, so this reliably tells the two apart.
+    """
+    digits = sum(c.isdigit() for c in candidate)
+    uppers = sum(c.isupper() for c in candidate)
+    lowers = sum(c.islower() for c in candidate)
+    return digits >= 5 and uppers >= 5 and lowers >= 5
+
+
 def _realpc_scan_text_for_danger(text: str):
-    """Check a raw text string against dangerous patterns.
-    Both the text AND each pattern are whitespace-stripped before comparing,
-    so patterns can be written with spaces for readability but still match
-    text typed with different/no spacing (evasion-resistant)."""
-    compact = "".join(text.lower().split())
+    """Check a raw text string against dangerous patterns, AND against the
+    long-base64-blob heuristic (see _REALPC_BASE64_BLOB_RE above).
+    Keyword matching is case-insensitive and whitespace-stripped (evasion-
+    resistant). The base64 check runs on the CASE-PRESERVED text, since the
+    upper/lower/digit mix is exactly the signal that tells a real base64
+    payload apart from an ordinary long sentence with its spaces removed."""
+    compact_cased = "".join(text.split())
+    compact_lower = compact_cased.lower()
+
     for pattern in _REALPC_DANGEROUS_TEXT_PATTERNS:
         pattern_compact = "".join(pattern.lower().split())
-        if pattern_compact and pattern_compact in compact:
+        if pattern_compact and pattern_compact in compact_lower:
             return pattern
+
+    for m in _REALPC_BASE64_BLOB_RE.finditer(compact_cased):
+        if _realpc_looks_like_base64(m.group()):
+            return "long base64 payload"
+
     return None
+
 
 
 # Map of !key / !press key names to the literal character they produce when
@@ -1849,13 +1897,12 @@ def _realpc_is_dangerous(action: str, args: str, username: str):
     settings, as long as the danger filter is enabled.
     """
     text = (args or "")
-    text_norm = " ".join(text.lower().split())
 
     # ── Direct single-shot check on this command's own text ──
     # (covers the simple case: someone just types the whole dangerous
     # command in one go, or pastes it via !send)
     if action in ("type", "write", "text", "say", "send", "sendline", "typeenter"):
-        hit = _realpc_scan_text_for_danger(text_norm)
+        hit = _realpc_scan_text_for_danger(text)
         if hit:
             return f"dangerous command text blocked: matched '{hit}'"
 
@@ -1909,6 +1956,102 @@ def _realpc_is_dangerous(action: str, args: str, username: str):
         _realpc_buffer_reset(username)
 
     return None
+
+
+# ── Same protection, for the VirtualBox VM's keyboard input ──
+# The VM's screen is exactly what OBS captures and puts on stream, so the
+# "chat spells out a dangerous command / smuggles a base64 image payload"
+# risk applies here too, not just to Real PC Control. Reuses the same
+# keyword list and base64 heuristic (_realpc_scan_text_for_danger) since
+# the danger signature is identical either way — only the typing buffer is
+# kept separate, since VM and Real PC are independent typing targets and
+# shouldn't be able to "help" each other spell something out.
+_vm_typing_buffers = {}
+_vm_typing_buffer_lock = threading.Lock()
+
+
+def _vm_buffer_get(username: str) -> str:
+    with _vm_typing_buffer_lock:
+        return _vm_typing_buffers.get(username, "")
+
+
+def _vm_buffer_set(username: str, value: str):
+    with _vm_typing_buffer_lock:
+        _vm_typing_buffers[username] = value[-_REALPC_BUFFER_MAX_LEN:]
+
+
+def _vm_buffer_reset(username: str):
+    with _vm_typing_buffer_lock:
+        _vm_typing_buffers[username] = ""
+
+
+def _vm_is_dangerous(action: str, args: str, username: str):
+    """
+    VM-side counterpart to _realpc_is_dangerous — same dangerous-keyword +
+    long-base64-payload checks, same chunked/spelled-out-over-time
+    detection via a rolling per-user buffer, just applied to VM keyboard
+    commands (cmd names as used by the VM chat-command dispatchers:
+    type/text/say/send/sendline/typeenter/key/press/enter).
+    """
+    text = (args or "")
+
+    if action in ("type", "text", "say", "send", "sendline", "typeenter"):
+        hit = _realpc_scan_text_for_danger(text)
+        if hit:
+            return f"dangerous command text blocked: matched '{hit}'"
+
+    if action in ("key", "press"):
+        key = text.strip().lower()
+        if key in _REALPC_DANGEROUS_KEYS:
+            return f"dangerous key blocked: {key}"
+
+    buf = _vm_buffer_get(username)
+
+    if action in ("type", "text", "say"):
+        buf += text
+    elif action in ("send", "sendline", "typeenter"):
+        buf += text
+    elif action in ("key", "press"):
+        key = text.strip().lower()
+        if key in ("enter", "return", "tab", "esc", "escape"):
+            buf += " "
+        else:
+            buf += _REALPC_KEY_TO_CHAR.get(key, " ")
+    elif action == "enter":
+        buf += " "
+    # any other action (mouse, startvm, restore, votehelp, etc.) doesn't
+    # affect typed text — buffer left as-is
+
+    _vm_buffer_set(username, buf)
+
+    hit = _realpc_scan_text_for_danger(buf)
+    if hit:
+        _vm_buffer_reset(username)
+        return f"dangerous command assembled across multiple steps: matched '{hit}'"
+
+    if action in ("enter", "send", "sendline", "typeenter"):
+        _vm_buffer_reset(username)
+    elif action in ("key", "press") and text.strip().lower() in ("enter", "return", "tab", "esc", "escape"):
+        _vm_buffer_reset(username)
+
+    return None
+
+
+def _vm_keyboard_blocked(action: str, args: str, username: str) -> bool:
+    """
+    Convenience wrapper for the VM chat-command dispatchers: runs the
+    danger check (if VM_DANGER_FILTER_ENABLED), logs + announces a block
+    if triggered, and returns True/False so call sites can just do
+    `if _vm_keyboard_blocked(...): continue`.
+    """
+    if not VM_DANGER_FILTER_ENABLED:
+        return False
+    reason = _vm_is_dangerous(action, args, username)
+    if reason:
+        print(f"[VM] BLOCKED ({reason}) — from {username}: !{action} {args!r}")
+        _append_event("VM_BLOCKED", username, f"!{action} {args!r} — {reason}")
+        return True
+    return False
 
 
 def _realpc_execute(username: str, action: str, args: str):
@@ -3087,6 +3230,34 @@ def save_auto_start_config():
     except Exception as e:
         print(f"[AutoStart] Save error: {e}")
 
+# ── VM Dangerous-Command / Base64-Payload Filter — master switch ──
+# Controls _vm_is_dangerous / _vm_keyboard_blocked (see their definitions
+# above). Default ON. Shown as a toggle on the Main tab since that's where
+# the primary VM bot controls live, and the VM's screen is exactly what
+# gets shown on stream.
+VM_DANGER_FILTER_ENABLED = True
+VM_DANGER_FILTER_CONFIG_FILE = "vm_danger_filter_config.json"
+
+def load_vm_danger_filter_config():
+    global VM_DANGER_FILTER_ENABLED
+    try:
+        if os.path.exists(VM_DANGER_FILTER_CONFIG_FILE):
+            with open(VM_DANGER_FILTER_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            VM_DANGER_FILTER_ENABLED = bool(data.get("enabled", True))
+            print(f"[VMDangerFilter] Config loaded. Enabled={VM_DANGER_FILTER_ENABLED}")
+    except Exception as e:
+        print(f"[VMDangerFilter] Load error: {e}")
+        VM_DANGER_FILTER_ENABLED = True
+
+def save_vm_danger_filter_config():
+    try:
+        with open(VM_DANGER_FILTER_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump({"enabled": VM_DANGER_FILTER_ENABLED}, f, indent=2)
+        print(f"[VMDangerFilter] Config saved. Enabled={VM_DANGER_FILTER_ENABLED}")
+    except Exception as e:
+        print(f"[VMDangerFilter] Save error: {e}")
+
 VOTE_ACTION_COOLDOWN = 60          # seconds after a restart/revert before another can be voted
 
 # ========================= RECONNECT CONFIG =========================
@@ -3849,6 +4020,14 @@ class YouTubeChatBot:
                                 except: pass
                                 continue
 
+                            # ── Same dangerous-command / base64-payload filter as
+                            # Real PC Control — applies here too since the VM's
+                            # screen is what actually gets shown on stream. ──
+                            if cmd in ('type', 'text', 'say', 'send', 'sendline',
+                                       'typeenter', 'key', 'press', 'enter'):
+                                if _vm_keyboard_blocked(cmd, args, user):
+                                    continue
+
                             if cmd in ['type', 'text', 'say']:
                                 send_keyboard(args)
                             elif cmd in ['typeenter', 'send', 'sendline']:
@@ -4181,6 +4360,12 @@ class YouTubeChatBotSecondary:
                             continue
                         # Keyboard / mouse passthrough
                         try:
+                            # Same dangerous-command / base64-payload filter as
+                            # Real PC Control and the main VM chat handler.
+                            if cmd in ('type', 'text', 'say', 'send', 'sendline',
+                                       'typeenter', 'key', 'press', 'enter'):
+                                if _vm_keyboard_blocked(cmd, args, user):
+                                    continue
                             if cmd in ('type', 'text', 'say'):
                                 send_keyboard(args)
                             elif cmd in ('send', 'sendline', 'typeenter'):
@@ -4515,6 +4700,7 @@ class NexovativeControlCenter:
         load_scheduler_config()
         load_custom_commands()
         load_nexoai_config()
+        load_vm_danger_filter_config()
         self._build_ui()
         self._setup_konami_code_listener()
 
@@ -5039,6 +5225,24 @@ class NexovativeControlCenter:
             activeforeground=self.TEXT, font=("Segoe UI", 9),
             command=self._on_auto_start_toggle)
         auto_chk.grid(row=3, column=1, columnspan=2, sticky="w", pady=(10,0))
+
+        # Base64 / Dangerous Command Blocker (VM) toggle
+        tk.Label(card, text="Danger Filter", bg=self.BG2,
+                 fg=self.TEXTDIM, font=("Segoe UI",9,"bold")).grid(
+                 row=4, column=0, sticky="w", padx=(0,8), pady=(10,0))
+        self._vm_danger_filter_var = tk.BooleanVar(value=VM_DANGER_FILTER_ENABLED)
+        danger_chk = tk.Checkbutton(card,
+            text="🛡 Block dangerous commands & base64 payloads typed into the VM",
+            variable=self._vm_danger_filter_var, bg=self.BG2, fg=self.TEXT,
+            selectcolor=self.BG3, activebackground=self.BG2,
+            activeforeground=self.TEXT, font=("Segoe UI", 9),
+            command=self._on_vm_danger_filter_toggle)
+        danger_chk.grid(row=4, column=1, columnspan=2, sticky="w", pady=(10,0))
+        tk.Label(card,
+                 text="Blocks destructive commands and long base64-encoded payloads "
+                      "(e.g. images decoded straight to disk) typed via chat into the VM.",
+                 bg=self.BG2, fg=self.TEXTDIM, font=("Segoe UI", 8),
+                 justify="left").grid(row=5, column=1, columnspan=2, sticky="w", pady=(0,4))
 
         card.columnconfigure(1, weight=1)
 
@@ -6150,6 +6354,73 @@ class NexovativeControlCenter:
         AUTO_START_ENABLED = self._auto_start_var.get()
         save_auto_start_config()
         self._log(f"[AutoStart] Watchdog {'enabled' if AUTO_START_ENABLED else 'disabled'} by user.")
+
+    def _on_vm_danger_filter_toggle(self):
+        """
+        Called when the Main tab's Danger Filter checkbox is clicked.
+        Turning it OFF requires two explicit hard warnings — same pattern
+        as the Real PC Control danger filter. Turning it back ON never
+        requires confirmation.
+        """
+        global VM_DANGER_FILTER_ENABLED
+
+        if self._vm_danger_filter_var.get():
+            # Re-enabled — no confirmation needed, just apply.
+            VM_DANGER_FILTER_ENABLED = True
+            save_vm_danger_filter_config()
+            self._log("[VMDangerFilter] Enabled by user.")
+            return
+
+        # Trying to turn it OFF — hard-stop with 2 warnings.
+        # Warning 1
+        if not messagebox.askokcancel(
+            "🛑  Disable Danger Filter — Warning 1 of 2",
+            "You are about to DISABLE the Base64 / Dangerous Command Filter "
+            "for the VM.\n\n"
+            "This filter is what stops YouTube chat viewers from typing "
+            "destructive commands (shutdown, format, del /f, registry edits, "
+            "PowerShell download-and-run chains, etc.) into the VM — "
+            "including ones spelled out across multiple small steps to "
+            "dodge detection.\n\n"
+            "It's ALSO what stops viewers from smuggling inappropriate "
+            "images or other files into the VM as a base64 payload typed "
+            "through chat and decoded straight to disk — which is exactly "
+            "the kind of thing that gets streams reported and channels "
+            "banned.\n\n"
+            "Click OK to continue to the final warning, or Cancel to keep "
+            "the filter enabled.",
+            icon="warning",
+        ):
+            self._vm_danger_filter_var.set(True)
+            return
+
+        # Warning 2 — final "I accept full responsibility" confirmation
+        if not messagebox.askokcancel(
+            "🛑  Disable Danger Filter — Warning 2 of 2  (Final)",
+            "FINAL CONFIRMATION:\n\n"
+            "By clicking OK you confirm that:\n\n"
+            "  • You are turning OFF protection against destructive "
+            "commands AND against base64-smuggled inappropriate content "
+            "being typed into the VM by chat.\n\n"
+            "  • YOU take FULL and SOLE responsibility for any damage, "
+            "content-policy strike, channel ban, or other consequence that "
+            "results from this VM being controlled by YouTube chat with "
+            "this protection disabled.\n\n"
+            "  • The developer (Nexovative) is NOT responsible under any "
+            "circumstances for the outcome of this decision.\n\n"
+            "Click OK to permanently disable the filter, or Cancel to keep "
+            "it enabled.",
+            icon="warning",
+        ):
+            self._vm_danger_filter_var.set(True)
+            return
+
+        # Both warnings accepted — actually disable it.
+        VM_DANGER_FILTER_ENABLED = False
+        save_vm_danger_filter_config()
+        self._log("[VMDangerFilter] ⚠ DISABLED by user after double confirmation.")
+        _append_event("VM_DANGER_FILTER", "SYSTEM",
+                       "VM danger/base64 filter disabled by operator after double confirmation")
 
     def _sync_main_vm_lock(self):
         """Lock the Main tab VM selector when OS Voting is enabled, since the
@@ -10535,6 +10806,7 @@ if __name__ == '__main__':
     load_realpc_config()
     load_reconnect_config()
     load_nexoai_config()
+    load_vm_danger_filter_config()
     _update_splash(97, "Building interface...")
 
     # Reuse the hidden host root that was created alongside the splash.
