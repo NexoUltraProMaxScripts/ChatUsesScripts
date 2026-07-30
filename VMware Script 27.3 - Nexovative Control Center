@@ -11,7 +11,6 @@ def _safe_signal(sig, handler):
         return _orig_signal(sig, handler)
 _signal_module.signal = _safe_signal
 
-import pytchat
 import time
 import subprocess
 import os
@@ -23,8 +22,53 @@ import sys
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from datetime import datetime
-from vncdotool import api as vnc
 from collections import defaultdict
+
+# ========================= OPTIONAL DEPENDENCIES =========================
+# These third-party libraries are optional. If any of them are missing,
+# the script will still start, but the features that depend on them
+# will be disabled and a message will explain what to install.
+MISSING_LIBRARIES = []  # list of (import_name, pip_name, description)
+
+try:
+    import pytchat
+    HAS_PYTCHAT = True
+except ImportError:
+    pytchat = None
+    HAS_PYTCHAT = False
+    MISSING_LIBRARIES.append((
+        "pytchat",
+        "pytchat",
+        "Reads YouTube Live Chat messages. Required for the bot to react to chat commands."
+    ))
+
+try:
+    from vncdotool import api as vnc
+    HAS_VNCDOTOOL = True
+except ImportError:
+    vnc = None
+    HAS_VNCDOTOOL = False
+    MISSING_LIBRARIES.append((
+        "vncdotool",
+        "vncdotool",
+        "Connects to the VM over VNC to send keyboard and mouse input. Required for all VM control commands (typing, clicking, moving the mouse, etc)."
+    ))
+
+
+def print_missing_libraries_report():
+    """Prints a clear report of any missing optional libraries and what they do."""
+    if not MISSING_LIBRARIES:
+        print("[Startup] All optional libraries are installed. All features are available.")
+        return
+    print("=" * 70)
+    print("[Startup] Some optional libraries are missing.")
+    print("The script will still run, but related features will be disabled.")
+    print("=" * 70)
+    for import_name, pip_name, description in MISSING_LIBRARIES:
+        print(f"  - Missing: {import_name}")
+        print(f"      Install with: pip install {pip_name}")
+        print(f"      Used for: {description}")
+    print("=" * 70)
 
 # ========================= CUSTOM COMMANDS =========================
 CUSTOM_COMMANDS_FILE = "custom_commands.json"
@@ -128,7 +172,23 @@ VNC_PASSWORD = "1234"
 YOUTUBE_VIDEO_ID = None
 VMX_PATH = None
 PREFIX = "!"
-VMRUN_PATH = r"C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe"
+def get_vmrun_path():
+    """Looks for vmrun.exe in both the 64-bit and 32-bit Program Files
+    locations, since the install path varies from system to system."""
+    possible_paths = [
+        r"C:\Program Files\VMware\VMware Workstation\vmrun.exe",
+        r"C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe",
+        r"D:\Program Files\VMware\VMware Workstation\vmrun.exe",
+        r"D:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe",
+    ]
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    # Fall back to the most common location so error messages still show
+    # a sensible path even when vmrun.exe cannot be found anywhere.
+    return possible_paths[0]
+
+VMRUN_PATH = get_vmrun_path()
 COOLDOWN = {"startvm": 45}
 
 # Single source of truth for vote settings.
@@ -259,6 +319,10 @@ class VMController:
 
     async def connect_fresh(self):
         await self._disconnect()
+        if not HAS_VNCDOTOOL:
+            print("VNC connect failed: vncdotool is not installed.")
+            self.client = None
+            return None
         try:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] New VNC connection...")
             loop = asyncio.get_running_loop()
@@ -559,7 +623,7 @@ def _save_vm_list(data: dict):
 
 
 # ========================= GUI =========================
-class UltraBotGUI:
+class NexovativeControlCenterGUI:
     BG      = "#0f0f1a"
     BG2     = "#16162a"
     BG3     = "#1e1e35"
@@ -576,7 +640,7 @@ class UltraBotGUI:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("UltraBot VMware Control Panel")
+        self.root.title("Nexovative Control Center")
         self.root.geometry("900x700")
         self.root.minsize(760, 580)
         self.root.configure(bg=self.BG)
@@ -592,6 +656,15 @@ class UltraBotGUI:
         self._build_ui()
         load_custom_commands()
         self._refresh_cmd_list()
+        self._report_missing_libraries()
+
+    def _report_missing_libraries(self):
+        if not MISSING_LIBRARIES:
+            self._log("[Startup] All optional libraries are installed. All features are available.")
+            return
+        self._log(f"[Startup] {len(MISSING_LIBRARIES)} optional library(ies) missing. Related features are disabled:")
+        for import_name, pip_name, description in MISSING_LIBRARIES:
+            self._log(f"  - {import_name} (pip install {pip_name}) → {description}")
 
     # ── Styles ──
     def _build_styles(self):
@@ -637,7 +710,7 @@ class UltraBotGUI:
         bar = tk.Frame(self.root, bg=self.BG2, height=48)
         bar.pack(fill="x")
         bar.pack_propagate(False)
-        tk.Label(bar, text="UltraBot  |  VMware Control Panel",
+        tk.Label(bar, text="Nexovative Control Center",
                  bg=self.BG2, fg=self.TEXT,
                  font=("Segoe UI",13,"bold")).pack(side="left", padx=16, pady=8)
         self._status_dot = tk.Label(bar, text="  Stopped",
@@ -1213,7 +1286,7 @@ def is_on_cooldown(cmd: str) -> bool:
 async def run_vmrun(args: list) -> bool:
     try:
         if not os.path.exists(VMRUN_PATH):
-            print(f"vmrun not found at: {VMRUN_PATH}")
+            print(f"vmrun not found. Checked Program Files and Program Files (x86): {VMRUN_PATH}")
             return False
         # run_in_executor prevents subprocess.run from blocking the async loop.
         loop   = asyncio.get_running_loop()
@@ -1530,6 +1603,9 @@ async def process_command(message: str, author: str):
 
 # ========================= MAIN LOOPS =========================
 async def youtube_loop():
+    if not HAS_PYTCHAT:
+        print("[Chat] pytchat is not installed - YouTube chat features are disabled.")
+        return
     while True:
         chat       = None
         chat_start = time.time()
@@ -1576,7 +1652,8 @@ async def youtube_loop():
 
 # ========================= MAIN =========================
 if __name__ == "__main__":
+    print_missing_libraries_report()
     load_custom_commands()
     root = tk.Tk()
-    app  = UltraBotGUI(root)
+    app  = NexovativeControlCenterGUI(root)
     root.mainloop()
