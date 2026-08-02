@@ -30,7 +30,16 @@ purposes, subject to the following conditions:
    Any permitted use, copy, or reference to the Software must retain
    this license and the original copyright notice.
 
-5. NO WARRANTY.
+5. ON-STREAM ATTRIBUTION.
+   If you use the Software (or any part of it) during a live stream or
+   in recorded stream content, you must display "Script by @Nexovative"
+   somewhere visible in your stream overlay/OBS scene (e.g. a corner
+   watermark, a "credits" panel, or similar) for the duration the
+   Software's features are actively in use. This applies regardless of
+   whether the Software's own built-in overlay is used or attribution is
+   provided through some other means.
+
+6. NO WARRANTY.
    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
@@ -38,7 +47,7 @@ purposes, subject to the following conditions:
    CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE USE OF THE
    SOFTWARE.
 
-6. TERMINATION.
+7. TERMINATION.
    Any violation of the terms above automatically terminates your rights
    under this license. The author reserves the right to request removal
    of any infringing copy, fork, or derivative and to pursue this
