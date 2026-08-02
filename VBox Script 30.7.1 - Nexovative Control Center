@@ -334,7 +334,6 @@ _STARTUP_OPTIONAL_DEPS = [
     ("pystray",      "pystray",  "pystray — system tray icon"),
     ("PIL",          "pillow",   "Pillow — tray icon image support"),
     ("pyautogui",    "pyautogui","pyautogui — Real PC Control (mouse/keyboard)"),
-    ("pygame",       "pygame",   "pygame — background music player"),
     ("psutil",       "psutil",   "psutil — CPU/RAM display & Lite Mode recommendation"),
 ]
 
@@ -382,10 +381,15 @@ def _show_vboxapi_only_notice():
     dlg.resizable(False, False)
     dlg.overrideredirect(True)
     W, H = 460, 220
-    sw = dlg.winfo_screenwidth()
-    sh = dlg.winfo_screenheight()
-    x = (sw - W) // 2
-    y = (sh - H) // 2
+    if SELECTED_MONITOR:
+        sw, sh = SELECTED_MONITOR["width"], SELECTED_MONITOR["height"]
+        mx, my = SELECTED_MONITOR["left"], SELECTED_MONITOR["top"]
+    else:
+        sw = dlg.winfo_screenwidth()
+        sh = dlg.winfo_screenheight()
+        mx, my = 0, 0
+    x = mx + (sw - W) // 2
+    y = my + (sh - H) // 2
     dlg.geometry(f"{W}x{H}+{x}+{y}")
     dlg.configure(bg="#0f0f1a")
 
@@ -452,10 +456,15 @@ def _run_dependency_check_and_offer_install():
     dlg.resizable(False, False)
     dlg.overrideredirect(True)
     W, H = 480, 460
-    sw = dlg.winfo_screenwidth()
-    sh = dlg.winfo_screenheight()
-    x = (sw - W) // 2
-    y = (sh - H) // 2
+    if SELECTED_MONITOR:
+        sw, sh = SELECTED_MONITOR["width"], SELECTED_MONITOR["height"]
+        mx, my = SELECTED_MONITOR["left"], SELECTED_MONITOR["top"]
+    else:
+        sw = dlg.winfo_screenwidth()
+        sh = dlg.winfo_screenheight()
+        mx, my = 0, 0
+    x = mx + (sw - W) // 2
+    y = my + (sh - H) // 2
     dlg.geometry(f"{W}x{H}+{x}+{y}")
     dlg.configure(bg="#0f0f1a")
 
@@ -662,10 +671,15 @@ def _show_chat_backend_dialog():
     dlg.resizable(False, False)
     dlg.overrideredirect(True)
     W, H = 480, 500
-    sw = dlg.winfo_screenwidth()
-    sh = dlg.winfo_screenheight()
-    x = (sw - W) // 2
-    y = (sh - H) // 2
+    if SELECTED_MONITOR:
+        sw, sh = SELECTED_MONITOR["width"], SELECTED_MONITOR["height"]
+        mx, my = SELECTED_MONITOR["left"], SELECTED_MONITOR["top"]
+    else:
+        sw = dlg.winfo_screenwidth()
+        sh = dlg.winfo_screenheight()
+        mx, my = 0, 0
+    x = mx + (sw - W) // 2
+    y = my + (sh - H) // 2
     dlg.geometry(f"{W}x{H}+{x}+{y}")
     dlg.configure(bg="#0f0f1a")
 
@@ -803,10 +817,15 @@ def _ask_startup_mode():
     dlg.resizable(False, False)
     dlg.overrideredirect(True)
     W, H = 460, 360
-    sw = dlg.winfo_screenwidth()
-    sh = dlg.winfo_screenheight()
-    x  = (sw - W) // 2
-    y  = (sh - H) // 2
+    if SELECTED_MONITOR:
+        sw, sh = SELECTED_MONITOR["width"], SELECTED_MONITOR["height"]
+        mx, my = SELECTED_MONITOR["left"], SELECTED_MONITOR["top"]
+    else:
+        sw = dlg.winfo_screenwidth()
+        sh = dlg.winfo_screenheight()
+        mx, my = 0, 0
+    x  = mx + (sw - W) // 2
+    y  = my + (sh - H) // 2
     dlg.geometry(f"{W}x{H}+{x}+{y}")
     dlg.configure(bg="#0f0f1a")
 
@@ -1401,9 +1420,14 @@ def _play_extended_intro_animation():
         win = tk.Toplevel(_host_root)
         win.overrideredirect(True)
         win.configure(bg=BG)
-        sw = win.winfo_screenwidth()
-        sh = win.winfo_screenheight()
-        win.geometry(f"{sw}x{sh}+0+0")
+        if SELECTED_MONITOR:
+            sw, sh = SELECTED_MONITOR["width"], SELECTED_MONITOR["height"]
+            mx, my = SELECTED_MONITOR["left"], SELECTED_MONITOR["top"]
+        else:
+            sw = win.winfo_screenwidth()
+            sh = win.winfo_screenheight()
+            mx, my = 0, 0
+        win.geometry(f"{sw}x{sh}+{mx}+{my}")
         win.attributes("-topmost", True)
         win.lift()
         win.focus_force()
@@ -2132,15 +2156,6 @@ except ImportError:
     _PYAUTOGUI_OK = False
     print("[RealPC] pyautogui not installed — Real PC Control tab will show install prompt. "
           "Run: pip install pyautogui")
-
-try:
-    import pygame
-    _PYGAME_OK = True
-except ImportError:
-    pygame     = None
-    _PYGAME_OK = False
-    print("[Music] pygame not installed — background music player will be disabled. "
-          "Run: pip install pygame")
 
 try:
     import psutil
@@ -5391,179 +5406,6 @@ class ConsoleRedirect:
         sys.stderr = self._orig_stderr
 
 
-# ========================= BACKGROUND MUSIC PLAYER =========================
-MUSIC_DIR = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "music")
-MUSIC_EXTENSIONS = (".mp3", ".wav", ".ogg")
-
-
-class MusicPlayer:
-    """
-    Plays audio files from the local `music` folder in order, one after
-    another. Exposes next/previous track controls, play/pause toggling,
-    and volume control, plus a callback that fires whenever the currently
-    playing track changes, so the GUI can update the "now playing" label
-    in the title bar.
-    """
-
-    DEFAULT_VOLUME = 0.5   # 0.0 (silent) to 1.0 (full volume)
-
-    def __init__(self, music_dir=MUSIC_DIR, on_track_change=None):
-        self.music_dir = music_dir
-        self.on_track_change = on_track_change   # callback(track_name_or_None)
-        self.tracks = []
-        self.current_index = -1
-        self._enabled = _PYGAME_OK
-        self._paused = False
-        self._volume = self.DEFAULT_VOLUME
-        self._watcher_thread = None
-        self._stop_watcher = _threading_module.Event()
-
-        if self._enabled:
-            try:
-                pygame.mixer.init()
-                pygame.mixer.music.set_volume(self._volume)
-            except Exception as e:
-                print(f"[Music] Could not initialize audio mixer: {e}")
-                self._enabled = False
-
-        self._refresh_track_list()
-
-    def is_enabled(self):
-        return self._enabled
-
-    def is_paused(self):
-        return self._paused
-
-    def _refresh_track_list(self):
-        """Scans the music folder and rebuilds the sorted track list."""
-        try:
-            os.makedirs(self.music_dir, exist_ok=True)
-        except Exception as e:
-            print(f"[Music] Could not create music folder: {e}")
-
-        try:
-            files = [
-                f for f in os.listdir(self.music_dir)
-                if f.lower().endswith(MUSIC_EXTENSIONS)
-            ]
-            files.sort(key=str.lower)
-        except Exception as e:
-            print(f"[Music] Could not read music folder: {e}")
-            files = []
-
-        self.tracks = files
-
-    def has_tracks(self):
-        return len(self.tracks) > 0
-
-    def _notify_track_change(self):
-        if self.on_track_change:
-            name = self.current_track_name()
-            try:
-                self.on_track_change(name)
-            except Exception:
-                pass
-
-    def current_track_name(self):
-        if 0 <= self.current_index < len(self.tracks):
-            return self.tracks[self.current_index]
-        return None
-
-    def _play_index(self, index):
-        if not self._enabled or not self.tracks:
-            return
-        index = index % len(self.tracks)
-        self.current_index = index
-        track_path = os.path.join(self.music_dir, self.tracks[index])
-        try:
-            pygame.mixer.music.load(track_path)
-            pygame.mixer.music.play()
-            self._paused = False
-        except Exception as e:
-            print(f"[Music] Could not play '{self.tracks[index]}': {e}")
-        self._notify_track_change()
-
-    def start(self):
-        """Starts sequential playback from the first track, if any exist."""
-        self._refresh_track_list()
-        if not self._enabled:
-            return
-        if not self.tracks:
-            self._notify_track_change()
-            return
-        self._play_index(0)
-        self._start_watcher()
-
-    def next_track(self):
-        if not self._enabled or not self.tracks:
-            return
-        self._play_index(self.current_index + 1)
-
-    def previous_track(self):
-        if not self._enabled or not self.tracks:
-            return
-        self._play_index(self.current_index - 1)
-
-    def toggle_pause(self):
-        """Pauses playback if currently playing, or resumes if paused."""
-        if not self._enabled or not self.tracks:
-            return
-        try:
-            if self._paused:
-                pygame.mixer.music.unpause()
-                self._paused = False
-            else:
-                pygame.mixer.music.pause()
-                self._paused = True
-        except Exception as e:
-            print(f"[Music] Could not toggle pause: {e}")
-
-    def set_volume(self, volume):
-        """Sets playback volume. volume must be between 0.0 and 1.0."""
-        self._volume = max(0.0, min(1.0, volume))
-        if self._enabled:
-            try:
-                pygame.mixer.music.set_volume(self._volume)
-            except Exception as e:
-                print(f"[Music] Could not set volume: {e}")
-
-    def get_volume(self):
-        return self._volume
-
-    def stop(self):
-        self._stop_watcher.set()
-        if self._enabled:
-            try:
-                pygame.mixer.music.stop()
-            except Exception:
-                pass
-
-    def _start_watcher(self):
-        """
-        Background thread that watches for the current track ending, and
-        automatically advances to the next track in the folder. Skips the
-        check while playback is paused.
-        """
-        if self._watcher_thread and self._watcher_thread.is_alive():
-            return
-        self._stop_watcher.clear()
-
-        def _watch():
-            while not self._stop_watcher.is_set():
-                time.sleep(1)
-                if not self._enabled or self._paused:
-                    continue
-                try:
-                    busy = pygame.mixer.music.get_busy()
-                except Exception:
-                    busy = False
-                if not busy and self.tracks:
-                    self.next_track()
-
-        self._watcher_thread = _threading_module.Thread(target=_watch, daemon=True)
-        self._watcher_thread.start()
-
-
 # ========================= GUI =========================
 class NexovativeControlCenter:
     # ── Color palette ──
@@ -5604,8 +5446,6 @@ class NexovativeControlCenter:
         self._bot_running  = False
         self._bot_instance = None
         self._console_redir = None
-
-        self.music_player = MusicPlayer(on_track_change=self._on_music_track_change)
 
         # Edit state for Command Builder
         self._editing_cmd  = None   # trigger key being edited
@@ -5785,47 +5625,6 @@ class NexovativeControlCenter:
                    style="Dim.TButton",
                    command=lambda: self.show_welcome_guide(force=True)
                    ).pack(side="right", padx=(0, 4), pady=6)
-
-        # ── Background music controls ──
-        music_bar = tk.Frame(title_bar, bg=self.BG2)
-        music_bar.pack(side="right", padx=(0, 16))
-
-        tk.Button(music_bar, text="⏭", bg=self.BG3, fg=self.TEXT,
-                  activebackground=self.ACCENT, activeforeground="#fff",
-                  relief="flat", bd=0, font=("Segoe UI", 10, "bold"),
-                  width=3, cursor="hand2",
-                  command=self._music_next).pack(side="right", padx=(2, 0))
-
-        self._play_pause_btn = tk.Button(
-            music_bar, text="⏸", bg=self.BG3, fg=self.TEXT,
-            activebackground=self.ACCENT, activeforeground="#fff",
-            relief="flat", bd=0, font=("Segoe UI", 10, "bold"),
-            width=3, cursor="hand2",
-            command=self._music_toggle_pause)
-        self._play_pause_btn.pack(side="right", padx=(2, 0))
-
-        self._now_playing_label = tk.Label(
-            music_bar, text="🎵 No music loaded",
-            bg=self.BG2, fg=self.TEXTDIM,
-            font=("Segoe UI", 9), anchor="center")
-        self._now_playing_label.pack(side="right", padx=6)
-
-        tk.Button(music_bar, text="⏮", bg=self.BG3, fg=self.TEXT,
-                  activebackground=self.ACCENT, activeforeground="#fff",
-                  relief="flat", bd=0, font=("Segoe UI", 10, "bold"),
-                  width=3, cursor="hand2",
-                  command=self._music_previous).pack(side="right", padx=(0, 2))
-
-        tk.Label(music_bar, text="🔊", bg=self.BG2, fg=self.TEXTDIM,
-                 font=("Segoe UI", 9)).pack(side="right", padx=(6, 2))
-
-        self._volume_var = tk.DoubleVar(value=self.music_player.get_volume() * 100)
-        volume_slider = ttk.Scale(
-            music_bar, from_=0, to=100, orient="horizontal",
-            length=80, variable=self._volume_var,
-            command=self._music_volume_changed)
-        volume_slider.pack(side="right", padx=(0, 2))
-
 
         # ── Scrollable tab bar wrapper ──
         # The ttk.Notebook tab strip doesn't scroll natively. We wrap it in a
@@ -11258,65 +11057,6 @@ class NexovativeControlCenter:
                   width=16, cursor="hand2", command=_pick_random,
                   ).pack(pady=(0, 16))
 
-    # ── Background music ──
-    def _on_music_track_change(self, track_name):
-        """Called by MusicPlayer whenever the playing track changes."""
-        MAX_LABEL_CHARS = 40
-        def _update():
-            if track_name:
-                display = os.path.splitext(track_name)[0]
-                if len(display) > MAX_LABEL_CHARS:
-                    display = display[:MAX_LABEL_CHARS - 1] + "…"
-                self._now_playing_label.configure(
-                    text=f"🎵 {display}", fg=self.TEXT)
-                self._play_pause_btn.configure(text="⏸")
-            else:
-                self._now_playing_label.configure(
-                    text="🎵 No music loaded", fg=self.TEXTDIM)
-        try:
-            self.root.after(0, _update)
-        except Exception:
-            pass
-
-    def _music_next(self):
-        self.music_player.next_track()
-
-    def _music_previous(self):
-        self.music_player.previous_track()
-
-    def _music_toggle_pause(self):
-        self.music_player.toggle_pause()
-        if self.music_player.is_paused():
-            self._play_pause_btn.configure(text="▶")
-        else:
-            self._play_pause_btn.configure(text="⏸")
-
-    def _music_volume_changed(self, value):
-        self.music_player.set_volume(float(value) / 100)
-
-    def start_background_music(self):
-        """
-        Starts the background music player. If pygame is unavailable, this
-        is silently skipped (already reported in the missing-libraries
-        summary). If the music folder is empty, the user is informed once
-        so they know where to drop their audio files.
-        """
-        if not self.music_player.is_enabled():
-            return
-
-        if not self.music_player.has_tracks():
-            messagebox.showinfo(
-                "Background Music",
-                "No music files were found.\n\n"
-                f"Add MP3, WAV, or OGG files to this folder to enable "
-                f"background music:\n\n{MUSIC_DIR}\n\n"
-                "Tracks will play in order, and you can skip to the "
-                "next or previous track using the controls in the top bar."
-            )
-            return
-
-        self.music_player.start()
-
     def show_welcome_guide(self, force=False):
         if not force and os.path.exists(self.GUIDE_FLAG_FILE):
             return
@@ -11831,8 +11571,6 @@ if __name__ == '__main__':
 
     app.show_welcome_guide()   # show user guide on first launch
 
-    app.start_background_music()   # start playing tracks from the music folder, if any
-
     start_tray_icon()
 
     def _on_close():
@@ -11857,7 +11595,6 @@ if __name__ == '__main__':
             bot_stop_event.set()
             stop_realpc_bot()
             stop_tray_icon()
-            app.music_player.stop()
             root.destroy()
             os._exit(0)
 
