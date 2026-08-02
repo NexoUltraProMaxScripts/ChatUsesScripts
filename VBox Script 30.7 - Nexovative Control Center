@@ -6,6 +6,44 @@ import tkinter as tk
 import os
 import sys
 import importlib.util as _importlib_util
+import json
+
+# Which backend the user wants YouTubeChatSource to use:
+#   "auto"            — try official (if key set) -> chat_downloader -> pytchat, in order (default)
+#   "official"        — official API only, no fallback
+#   "chat_downloader" — chat-downloader only, no fallback
+#   "pytchat"         — pytchat only, no fallback
+# Asked once at startup via _ask_chat_backend_choice(), changeable any
+# time after that by re-running the picker or editing the config file.
+# Defined here (near the top) because _ask_chat_backend_choice() /
+# _show_chat_backend_dialog() are called during splash startup, before
+# the rest of the module body has executed.
+CHAT_BACKEND_PREFERENCE      = "auto"
+CHAT_BACKEND_PREFERENCE_FILE = "chat_backend_preference.json"
+
+
+def load_chat_backend_preference():
+    global CHAT_BACKEND_PREFERENCE
+    try:
+        if os.path.exists(CHAT_BACKEND_PREFERENCE_FILE):
+            with open(CHAT_BACKEND_PREFERENCE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            pref = data.get("backend", "auto")
+            if pref in ("auto", "official", "chat_downloader", "pytchat"):
+                CHAT_BACKEND_PREFERENCE = pref
+    except Exception as e:
+        print(f"[ChatBackendPref] Load error: {e}")
+        CHAT_BACKEND_PREFERENCE = "auto"
+
+
+def save_chat_backend_preference():
+    try:
+        with open(CHAT_BACKEND_PREFERENCE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"backend": CHAT_BACKEND_PREFERENCE}, f, indent=2)
+        print(f"[ChatBackendPref] Saved: {CHAT_BACKEND_PREFERENCE}")
+    except Exception as e:
+        print(f"[ChatBackendPref] Save error: {e}")
+
 
 # ========================= UAC ELEVATION =========================
 # If not already running as administrator, re-launch with ShellExecuteW
@@ -44,7 +82,7 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & UPDATE CHECK =========================
-VERSION = "30.6.0"   # increment this with every release
+VERSION = "30.7.0"   # increment this with every release
 
 # Raw URL of version.json in your repo, and the page to send users to
 # when a newer version is available.
@@ -288,7 +326,9 @@ def _ask_monitor_choice(monitors):
 # one-click fix, instead of the user discovering it feature-by-feature.
 _STARTUP_OPTIONAL_DEPS = [
     # (import_name, pip_package_name, human_label)
-    ("pytchat",      "pytchat",  "pytchat — reading YouTube live chat"),
+    ("pytchat",         "pytchat",                 "pytchat — reading YouTube live chat (backend 3 of 3)"),
+    ("chat_downloader", "chat-downloader",          "chat-downloader — reading YouTube live chat (backend 2 of 3)"),
+    ("googleapiclient", "google-api-python-client", "google-api-python-client — official YouTube Data API chat backend (backend 1 of 3, needs an API key)"),
     ("win32com",     "pywin32",  "pywin32 — Windows COM / SAPI text-to-speech"),
     ("plyer",        "plyer",    "plyer — desktop toast notifications"),
     ("pystray",      "pystray",  "pystray — system tray icon"),
@@ -411,7 +451,7 @@ def _run_dependency_check_and_offer_install():
     dlg.title("")
     dlg.resizable(False, False)
     dlg.overrideredirect(True)
-    W, H = 480, 420
+    W, H = 480, 460
     sw = dlg.winfo_screenwidth()
     sh = dlg.winfo_screenheight()
     x = (sw - W) // 2
@@ -428,34 +468,27 @@ def _run_dependency_check_and_offer_install():
              bg="#0f0f1a", fg="#ffffff",
              font=("Segoe UI", 14, "bold")).pack(pady=(18, 4))
 
-    if missing:
-        tk.Label(inner,
-                 text=f"{len(missing)} optional package(s) used by this script "
-                      f"aren't installed:",
-                 bg="#0f0f1a", fg="#aaaaaa",
-                 font=("Segoe UI", 9), justify="center",
-                 wraplength=440).pack(pady=(0, 6))
+    # ── Bottom-anchored controls, packed FIRST so they always stay
+    # visible no matter how long the missing-libraries list gets —
+    # same fix as the NexoAI chat input row: an expand=True widget
+    # packed first would claim all the space and push a later
+    # side="bottom" widget out of view. ──
+    btn_row = tk.Frame(inner, bg="#0f0f1a")
+    btn_row.pack(side="bottom", pady=(6, 14))
 
-        list_frame = tk.Frame(inner, bg="#1e1e2e")
-        list_frame.pack(fill="x", padx=20, pady=(0, 10))
-        for _, pip_name, label in missing:
-            tk.Label(list_frame, text=f"•  {label}",
-                     bg="#1e1e2e", fg="#f0c060",
-                     font=("Segoe UI", 9), anchor="w",
-                     justify="left", wraplength=400).pack(fill="x", padx=10, pady=2)
-
-    if not vbox_ok:
-        tk.Label(inner,
-                 text="⚠ vboxapi is also missing, but it can't be installed via "
-                      "pip — it ships with the VirtualBox SDK. VirtualBox "
-                      "mouse/session control will stay disabled until you "
-                      "install it manually from the VirtualBox SDK for your "
-                      "Python environment.",
-                 bg="#0f0f1a", fg="#e8a33d",
-                 font=("Segoe UI", 8), justify="left",
-                 wraplength=440).pack(padx=20, pady=(0, 10))
+    info_label = tk.Label(inner,
+             text="Install them automatically now? Each will be installed "
+                  "with pip, one at a time, with progress shown below. "
+                  "You can also skip this — every feature above just stays "
+                  "disabled until you install its package yourself.",
+             bg="#0f0f1a", fg="#888888",
+             font=("Segoe UI", 8), justify="left",
+             wraplength=440)
+    info_label.pack(side="bottom", padx=20, pady=(0, 6))
 
     progress_frame = tk.Frame(inner, bg="#0f0f1a")
+    # Not packed yet — only shown once install actually starts (see
+    # _do_install), packed side="bottom" at that point too.
     status_label = tk.Label(progress_frame, text="", bg="#0f0f1a", fg="#cccccc",
                              font=("Segoe UI", 9))
     status_label.pack(pady=(4, 4))
@@ -468,13 +501,67 @@ def _run_dependency_check_and_offer_install():
                           font=("Segoe UI", 8, "bold"))
     pct_label.pack()
 
+    if not vbox_ok:
+        tk.Label(inner,
+                 text="⚠ vboxapi is also missing, but it can't be installed via "
+                      "pip — it ships with the VirtualBox SDK. VirtualBox "
+                      "mouse/session control will stay disabled until you "
+                      "install it manually from the VirtualBox SDK for your "
+                      "Python environment.",
+                 bg="#0f0f1a", fg="#e8a33d",
+                 font=("Segoe UI", 8), justify="left",
+                 wraplength=440).pack(side="bottom", padx=20, pady=(0, 6))
+
+    if missing:
+        tk.Label(inner,
+                 text=f"{len(missing)} optional package(s) used by this script "
+                      f"aren't installed:",
+                 bg="#0f0f1a", fg="#aaaaaa",
+                 font=("Segoe UI", 9), justify="center",
+                 wraplength=440).pack(pady=(0, 6))
+
+        # Scrollable list — fixed max height (doesn't matter if there are
+        # 3 missing libraries or 30, the dialog itself never grows and
+        # the buttons below never get pushed off-screen).
+        list_outer = tk.Frame(inner, bg="#1e1e2e", highlightthickness=0)
+        list_outer.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+
+        list_canvas = tk.Canvas(list_outer, bg="#1e1e2e", highlightthickness=0,
+                                 height=160)
+        list_scrollbar = tk.Scrollbar(list_outer, orient="vertical",
+                                       command=list_canvas.yview)
+        list_frame = tk.Frame(list_canvas, bg="#1e1e2e")
+
+        list_frame.bind(
+            "<Configure>",
+            lambda e: list_canvas.configure(scrollregion=list_canvas.bbox("all"))
+        )
+        list_canvas.create_window((0, 0), window=list_frame, anchor="nw",
+                                   width=W - 76)
+        list_canvas.configure(yscrollcommand=list_scrollbar.set)
+
+        list_canvas.pack(side="left", fill="both", expand=True)
+        list_scrollbar.pack(side="right", fill="y")
+
+        # Mouse wheel support (Windows sends <MouseWheel> with .delta)
+        def _on_mousewheel(event):
+            list_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        list_canvas.bind("<Enter>", lambda e: list_canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        list_canvas.bind("<Leave>", lambda e: list_canvas.unbind_all("<MouseWheel>"))
+
+        for _, pip_name, label in missing:
+            tk.Label(list_frame, text=f"•  {label}",
+                     bg="#1e1e2e", fg="#f0c060",
+                     font=("Segoe UI", 9), anchor="w",
+                     justify="left", wraplength=W - 96).pack(fill="x", padx=10, pady=2)
+
     result = {"choice": None}   # "install", "skip", or None (window closed)
 
     def _do_install():
         btn_row.pack_forget()
         if missing:
             info_label.pack_forget()
-        progress_frame.pack(pady=(6, 10))
+        progress_frame.pack(side="bottom", pady=(6, 10))
         dlg.update()
 
         total = len(missing)
@@ -511,19 +598,6 @@ def _run_dependency_check_and_offer_install():
         result["choice"] = "skip"
         dlg.destroy()
 
-    info_label = tk.Label(inner,
-             text="Install them automatically now? Each will be installed "
-                  "with pip, one at a time, with progress shown below. "
-                  "You can also skip this — every feature above just stays "
-                  "disabled until you install its package yourself.",
-             bg="#0f0f1a", fg="#888888",
-             font=("Segoe UI", 8), justify="left",
-             wraplength=440)
-    info_label.pack(padx=20, pady=(0, 10))
-
-    btn_row = tk.Frame(inner, bg="#0f0f1a")
-    btn_row.pack(pady=(0, 10))
-
     if missing:
         tk.Button(
             btn_row, text="✅  Install Automatically",
@@ -553,6 +627,139 @@ def _run_dependency_check_and_offer_install():
     if result["choice"] == "install":
         _restart_script()   # never returns — new process takes over
     # "skip" or window closed some other way -> fall through, startup continues
+
+
+def _ask_chat_backend_choice():
+    """
+    Called at startup, right after the dependency check dialog and before
+    the Lite/Full GUI mode picker. Shows the picker dialog ONLY if no
+    remembered choice exists yet — if the user previously checked
+    "Remember my choice", this skips straight past silently and just
+    uses the saved preference. See _show_chat_backend_dialog() for the
+    actual picker (also reachable later from the Main tab).
+    """
+    if os.path.exists(CHAT_BACKEND_PREFERENCE_FILE):
+        # A previous launch already remembered a choice — honor it
+        # silently instead of asking again.
+        load_chat_backend_preference()
+        return
+    _show_chat_backend_dialog()
+
+
+def _show_chat_backend_dialog():
+    """
+    Lets the user choose which YouTube chat backend YouTubeChatSource
+    should use — see the class docstring for what each one means. Sets
+    the global CHAT_BACKEND_PREFERENCE and persists it if "Remember my
+    choice" is checked. Called both at startup (via
+    _ask_chat_backend_choice) and on demand from the Main tab's
+    "Change Chat Backend" button.
+    """
+    global CHAT_BACKEND_PREFERENCE
+
+    dlg = tk.Toplevel(_host_root)
+    dlg.title("")
+    dlg.resizable(False, False)
+    dlg.overrideredirect(True)
+    W, H = 480, 500
+    sw = dlg.winfo_screenwidth()
+    sh = dlg.winfo_screenheight()
+    x = (sw - W) // 2
+    y = (sh - H) // 2
+    dlg.geometry(f"{W}x{H}+{x}+{y}")
+    dlg.configure(bg="#0f0f1a")
+
+    border = tk.Frame(dlg, bg="#7c5cbf", padx=2, pady=2)
+    border.place(relx=0, rely=0, relwidth=1, relheight=1)
+    inner = tk.Frame(border, bg="#0f0f1a")
+    inner.pack(fill="both", expand=True)
+
+    tk.Label(inner, text="YouTube Chat Backend",
+             bg="#0f0f1a", fg="#ffffff",
+             font=("Segoe UI", 14, "bold")).pack(pady=(18, 4))
+
+    tk.Label(inner,
+             text="How should the bot read YouTube live chat?",
+             bg="#0f0f1a", fg="#aaaaaa",
+             font=("Segoe UI", 9), justify="center",
+             wraplength=440).pack(pady=(0, 14))
+
+    remember_var = tk.BooleanVar(value=True)
+
+    result = {"backend": CHAT_BACKEND_PREFERENCE}
+
+    def _choose(backend):
+        result["backend"] = backend
+        dlg.destroy()
+
+    options = [
+        ("auto", "🔀  Auto (recommended)",
+         "Tries the official API first (if a key is set on the Main tab), "
+         "then chat-downloader, then pytchat — falls back automatically "
+         "if one fails."),
+        ("official", "🔑  Official YouTube API only",
+         "Needs an API key (set on the Main tab). Never breaks from a "
+         "YouTube update, but uses your daily API quota. Fails with no "
+         "fallback if the key is missing/invalid."),
+        ("chat_downloader", "📥  chat-downloader only",
+         "Free, no API key needed. Unofficial — reads YouTube's internal "
+         "chat format, so it can break if YouTube changes something.\n"
+         "⚠ Known issue: currently prone to failing with \"Unable to parse "
+         "initial video data\" — a bug in the chat-downloader library itself "
+         "(YouTube page format it depends on). If you hit that error, switch "
+         "to Auto or pytchat, or try 'pip install --upgrade chat-downloader'."),
+        ("pytchat", "🐍  pytchat only",
+         "Free, no API key needed. The original backend this script has "
+         "always used. Also unofficial, same breakage risk as above."),
+    ]
+
+    for value, title, desc in options:
+        row = tk.Frame(inner, bg="#1e1e2e", cursor="hand2")
+        row.pack(fill="x", padx=20, pady=4)
+
+        is_current = (value == CHAT_BACKEND_PREFERENCE)
+        title_fg = "#3ddc97" if is_current else "#ffffff"
+        suffix = "   (current)" if is_current else ""
+
+        title_lbl = tk.Label(row, text=title + suffix, bg="#1e1e2e", fg=title_fg,
+                              font=("Segoe UI", 10, "bold"), anchor="w",
+                              justify="left")
+        title_lbl.pack(fill="x", padx=10, pady=(6, 0))
+        desc_fg = "#e0a72e" if value == "chat_downloader" else "#888888"
+        desc_lbl = tk.Label(row, text=desc, bg="#1e1e2e", fg=desc_fg,
+                             font=("Segoe UI", 8), anchor="w", justify="left",
+                             wraplength=420)
+        desc_lbl.pack(fill="x", padx=10, pady=(0, 6))
+
+        for widget in (row, title_lbl, desc_lbl):
+            widget.bind("<Button-1>", lambda e, v=value: _choose(v))
+
+    remember_chk = tk.Checkbutton(
+        inner, text="Remember my choice (don't ask again next launch)",
+        variable=remember_var, bg="#0f0f1a", fg="#aaaaaa",
+        selectcolor="#1e1e2e", activebackground="#0f0f1a",
+        activeforeground="#ffffff", font=("Segoe UI", 8))
+    remember_chk.pack(pady=(8, 4))
+
+    dlg.lift()
+    dlg.attributes("-topmost", True)
+    dlg.focus_force()
+    dlg.update()
+
+    dlg.wait_window(dlg)
+
+    CHAT_BACKEND_PREFERENCE = result["backend"]
+    if remember_var.get():
+        save_chat_backend_preference()
+    else:
+        # Explicitly reset the saved file to "auto" so a previous
+        # "remembered" choice doesn't linger and get picked up next
+        # launch after the user just said not to remember this one.
+        try:
+            if os.path.exists(CHAT_BACKEND_PREFERENCE_FILE):
+                os.remove(CHAT_BACKEND_PREFERENCE_FILE)
+        except Exception:
+            pass
 
 
 def _ask_startup_mode():
@@ -725,6 +932,8 @@ def _create_splash():
     _ask_monitor_choice(monitors)   # only actually prompts if more than one monitor was found
 
     _run_dependency_check_and_offer_install()   # offers to pip-install any missing optional packages; restarts the script if the user accepts
+
+    _ask_chat_backend_choice()   # user picks which YouTube chat backend to use (official API / chat-downloader / pytchat / auto)
 
     _ask_startup_mode()   # user picks Full GUI vs Lite Mode before anything else loads
 
@@ -1498,6 +1707,375 @@ except ImportError:
     _PYTCHAT_OK = False
     print("[Startup] pytchat not installed — YouTube chat reading will be disabled. Run: pip install pytchat")
 
+try:
+    from chat_downloader import ChatDownloader as _ChatDownloaderLib
+    _CHAT_DOWNLOADER_OK = True
+except ImportError:
+    _ChatDownloaderLib = None
+    _CHAT_DOWNLOADER_OK = False
+    print("[Startup] chat-downloader not installed — that chat backend will be unavailable. "
+          "Run: pip install chat-downloader")
+
+try:
+    from googleapiclient.discovery import build as _google_api_build
+    _GOOGLE_API_OK = True
+except ImportError:
+    _google_api_build = None
+    _GOOGLE_API_OK = False
+    print("[Startup] google-api-python-client not installed — the official YouTube Data API "
+          "chat backend will be unavailable. Run: pip install google-api-python-client")
+
+
+# ========================= YOUTUBE CHAT SOURCE ADAPTER =========================
+# Every part of the script that reads YouTube live chat goes through this
+# adapter — NOTHING outside this block ever calls pytchat directly.
+#
+# Why: pytchat hasn't been meaningfully updated in years, and it works by
+# reverse-engineering YouTube's internal (undocumented) live-chat data
+# format. If YouTube changes that format, pytchat can break instantly and
+# completely, with no fix available from upstream.
+#
+# Because every reader in this script (Real PC's chat listener, the main
+# bot, the multi-stream secondary bot) used to call pytchat.create() /
+# .is_alive() / .terminate() / .get().sync_items() directly, a pytchat
+# break would have meant hunting down and fixing the same broken calls in
+# several different places. With this adapter, swapping pytchat for a
+# replacement library (or a hand-rolled scraper) later is a change to
+# ONE class — YouTubeChatSource — instead of a script-wide rewrite.
+# (CHAT_BACKEND_PREFERENCE, CHAT_BACKEND_PREFERENCE_FILE,
+#  load_chat_backend_preference() and save_chat_backend_preference() are
+#  defined near the top of the file — splash startup needs them before
+#  this point in the module.)
+
+
+class ChatMessage:
+    """A single chat message, normalized so callers never touch pytchat's
+    own message-object shape directly."""
+    __slots__ = ("id", "author_name", "is_owner", "text")
+
+    def __init__(self, id, author_name, is_owner, text):
+        self.id          = id
+        self.author_name = author_name
+        self.is_owner    = is_owner
+        self.text        = text
+
+
+class YouTubeChatSource:
+    """
+    Reads YouTube live chat through up to three backends, tried in order
+    of reliability:
+
+      1. Official YouTube Data API v3 — used only if an API key is
+         configured. This is the only backend Google actually guarantees
+         to keep working, since it's a supported, documented API rather
+         than a reverse-engineered read of YouTube's internal chat
+         format. Costs YouTube API quota per poll.
+      2. chat-downloader — unofficial, no API key needed.
+      3. pytchat — unofficial, no API key needed.
+
+    Backends 2 and 3 both work by reverse-engineering YouTube's internal,
+    undocumented chat data format, so either one can break instantly and
+    completely if YouTube changes that format, with no guarantee of a
+    fix from upstream. Having two of them side by side means one
+    breaking doesn't necessarily take both down at once, and connect()
+    automatically falls through to the next available backend.
+
+    Every reader in the script talks only to this class — never to
+    pytchat / chat_downloader / googleapiclient directly. If any backend
+    breaks or a better one comes along later, only this class needs to
+    change.
+    """
+
+    def __init__(self, video_id: str, api_key: str = ""):
+        self.video_id   = video_id
+        self.api_key    = (api_key or "").strip()
+        self.backend_name = None   # "official" / "chat_downloader" / "pytchat" / None
+
+        # Official API state
+        self._official_service         = None
+        self._official_live_chat_id    = None
+        self._official_next_page_token = None
+
+        # chat-downloader state — its iterator blocks waiting for each
+        # message, so it runs in its own thread feeding a queue that
+        # get_messages() can drain without blocking the caller.
+        self._cd_chat       = None
+        self._cd_queue      = None
+        self._cd_thread     = None
+        self._cd_stop_event = None
+
+        # pytchat state
+        self._pytchat_backend = None
+
+    # ------------------------------------------------------------ connect
+
+    def connect(self) -> bool:
+        """
+        (Re)connects using whichever backend(s) CHAT_BACKEND_PREFERENCE
+        allows. "auto" (default) tries official -> chat_downloader ->
+        pytchat in order, falling through on failure. Any specific
+        choice ("official" / "chat_downloader" / "pytchat") tries ONLY
+        that backend — no silent fallback — since the whole point of
+        picking one explicitly is to control what's actually being used.
+        """
+        self.terminate()
+        pref = CHAT_BACKEND_PREFERENCE if CHAT_BACKEND_PREFERENCE in (
+            "auto", "official", "chat_downloader", "pytchat") else "auto"
+
+        if pref == "official":
+            if self.api_key and self._connect_official():
+                self.backend_name = "official"
+                return True
+            if not self.api_key:
+                print("[ChatSource] Preference is 'official' but no API key is set.")
+            print(f"[ChatSource] Official API connect failed ({self.video_id}) — "
+                  "not falling back, per preference.")
+            self.backend_name = None
+            return False
+
+        if pref == "chat_downloader":
+            if self._connect_chat_downloader():
+                self.backend_name = "chat_downloader"
+                return True
+            print(f"[ChatSource] chat-downloader connect failed ({self.video_id}) — "
+                  "not falling back, per preference.")
+            self.backend_name = None
+            return False
+
+        if pref == "pytchat":
+            if self._connect_pytchat():
+                self.backend_name = "pytchat"
+                return True
+            print(f"[ChatSource] pytchat connect failed ({self.video_id}) — "
+                  "not falling back, per preference.")
+            self.backend_name = None
+            return False
+
+        # pref == "auto" — try each in order, falling through on failure.
+        if self.api_key and self._connect_official():
+            self.backend_name = "official"
+            return True
+        if self.api_key:
+            print("[ChatSource] Official API failed — falling back to chat-downloader.")
+
+        if self._connect_chat_downloader():
+            self.backend_name = "chat_downloader"
+            return True
+        print("[ChatSource] chat-downloader unavailable — falling back to pytchat.")
+
+        if self._connect_pytchat():
+            self.backend_name = "pytchat"
+            return True
+
+        print(f"[ChatSource] All backends failed to connect ({self.video_id}).")
+        self.backend_name = None
+        return False
+
+    def _connect_official(self) -> bool:
+        if not _GOOGLE_API_OK:
+            print("[ChatSource] google-api-python-client not installed — skipping official API.")
+            return False
+        try:
+            self._official_service = _google_api_build(
+                "youtube", "v3", developerKey=self.api_key, cache_discovery=False)
+            video_resp = self._official_service.videos().list(
+                part="liveStreamingDetails", id=self.video_id
+            ).execute()
+            items = video_resp.get("items", [])
+            if not items:
+                print(f"[ChatSource] Official API: video '{self.video_id}' not found.")
+                self._official_service = None
+                return False
+            chat_id = items[0].get("liveStreamingDetails", {}).get("activeLiveChatId")
+            if not chat_id:
+                print(f"[ChatSource] Official API: video '{self.video_id}' has no active live chat.")
+                self._official_service = None
+                return False
+            self._official_live_chat_id    = chat_id
+            self._official_next_page_token = None
+            return True
+        except Exception as e:
+            print(f"[ChatSource] Official API connect failed: {e}")
+            self._official_service = None
+            return False
+
+    def _connect_chat_downloader(self) -> bool:
+        if not _CHAT_DOWNLOADER_OK:
+            print("[ChatSource] chat-downloader not installed — skipping.")
+            return False
+        try:
+            url = f"https://www.youtube.com/watch?v={self.video_id}"
+            self._cd_chat       = _ChatDownloaderLib().get_chat(url)
+            self._cd_queue      = queue.Queue()
+            self._cd_stop_event = threading.Event()
+            self._cd_thread = threading.Thread(
+                target=self._cd_pump, daemon=True,
+                name=f"cd_pump_{self.video_id}")
+            self._cd_thread.start()
+            return True
+        except Exception as e:
+            print(f"[ChatSource] chat-downloader connect failed: {e}")
+            self._cd_chat = None
+            return False
+
+    def _cd_pump(self):
+        """Background thread: chat-downloader's iterator blocks waiting for
+        each message to arrive, so it needs a dedicated thread feeding a
+        queue that get_messages() can drain without blocking the caller."""
+        try:
+            for item in self._cd_chat:
+                if self._cd_stop_event.is_set():
+                    break
+                self._cd_queue.put(item)
+        except Exception as e:
+            if not self._cd_stop_event.is_set():
+                print(f"[ChatSource] chat-downloader stream ended: {e}")
+        finally:
+            self._cd_queue.put(None)   # signals end-of-stream to is_alive()/get_messages()
+
+    def _connect_pytchat(self) -> bool:
+        if not _PYTCHAT_OK:
+            print("[ChatSource] pytchat not installed — skipping.")
+            return False
+        try:
+            self._pytchat_backend = pytchat.create(video_id=self.video_id)
+            return True
+        except Exception as e:
+            print(f"[ChatSource] pytchat connect failed: {e}")
+            self._pytchat_backend = None
+            return False
+
+    # ---------------------------------------------------------- is_alive
+
+    def is_alive(self) -> bool:
+        try:
+            if self.backend_name == "official":
+                return self._official_service is not None
+            elif self.backend_name == "chat_downloader":
+                return bool(self._cd_thread and self._cd_thread.is_alive())
+            elif self.backend_name == "pytchat":
+                return bool(self._pytchat_backend and self._pytchat_backend.is_alive())
+        except Exception:
+            return False
+        return False
+
+    # ------------------------------------------------------ get_messages
+
+    def get_messages(self):
+        """Returns a list of ChatMessage for whatever arrived since the last call."""
+        if self.backend_name == "official":
+            return self._get_messages_official()
+        elif self.backend_name == "chat_downloader":
+            return self._get_messages_chat_downloader()
+        elif self.backend_name == "pytchat":
+            return self._get_messages_pytchat()
+        return []
+
+    def _get_messages_official(self):
+        try:
+            resp = self._official_service.liveChatMessages().list(
+                liveChatId=self._official_live_chat_id,
+                part="snippet,authorDetails",
+                pageToken=self._official_next_page_token,
+            ).execute()
+        except Exception as e:
+            print(f"[ChatSource] Official API poll error: {e}")
+            return []
+
+        self._official_next_page_token = resp.get("nextPageToken")
+
+        # Respect YouTube's suggested polling interval (capped at 10s) so
+        # this doesn't burn through the daily API quota faster than needed.
+        poll_ms = resp.get("pollingIntervalMillis", 5000)
+        time.sleep(min(max(poll_ms, 1000), 10000) / 1000)
+
+        out = []
+        for item in resp.get("items", []):
+            snippet = item.get("snippet", {}) or {}
+            author  = item.get("authorDetails", {}) or {}
+            out.append(ChatMessage(
+                id=item.get("id"),
+                author_name=author.get("displayName", ""),
+                is_owner=bool(author.get("isChatOwner", False)),
+                text=snippet.get("displayMessage", "") or "",
+            ))
+        return out
+
+    def _get_messages_chat_downloader(self):
+        out = []
+        while True:
+            try:
+                item = self._cd_queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is None:
+                # end-of-stream sentinel from _cd_pump — put it back so
+                # is_alive() logic (thread-based) still reflects reality,
+                # nothing further to read this round.
+                break
+            try:
+                author = item.get("author", {}) or {}
+                # NOTE: chat-downloader doesn't expose a dedicated
+                # "is channel owner" boolean for YouTube — this infers it
+                # from the author's badge tooltips, which is the best
+                # signal available. Verify against a live stream if exact
+                # owner detection matters for your use case.
+                is_owner = any(
+                    "owner" in (b.get("title", "") or "").lower()
+                    for b in (author.get("badges", []) or [])
+                )
+                out.append(ChatMessage(
+                    id=item.get("message_id"),
+                    author_name=author.get("name", "") or "",
+                    is_owner=is_owner,
+                    text=item.get("message", "") or "",
+                ))
+            except Exception as e:
+                print(f"[ChatSource] Skipped malformed message: {e}")
+        return out
+
+    def _get_messages_pytchat(self):
+        if not self._pytchat_backend:
+            return []
+        items = self._pytchat_backend.get().sync_items()
+        out = []
+        for item in items:
+            try:
+                out.append(ChatMessage(
+                    id=getattr(item, "id", None),
+                    author_name=item.author.name,
+                    is_owner=getattr(item.author, "isChatOwner", False),
+                    text=item.message,
+                ))
+            except Exception as e:
+                print(f"[ChatSource] Skipped malformed message: {e}")
+        return out
+
+    # ----------------------------------------------------------- cleanup
+
+    def terminate(self):
+        self._official_service         = None
+        self._official_live_chat_id    = None
+        self._official_next_page_token = None
+
+        if self._cd_stop_event:
+            self._cd_stop_event.set()
+        if self._cd_thread and self._cd_thread.is_alive():
+            self._cd_thread.join(timeout=1)
+        self._cd_chat   = None
+        self._cd_queue  = None
+        self._cd_thread = None
+        self._cd_stop_event = None
+
+        if self._pytchat_backend:
+            try:
+                self._pytchat_backend.terminate()
+            except Exception:
+                pass
+        self._pytchat_backend = None
+
+        self.backend_name = None
+
 _update_splash(35, "Importing VirtualBox API...")
 try:
     from vboxapi import VirtualBoxManager
@@ -1510,6 +2088,7 @@ except ImportError:
 
 _update_splash(50, "Importing system libraries...")
 import threading
+import queue
 import re
 try:
     import win32com.client
@@ -1905,7 +2484,31 @@ BAN_DURATION      = 1800
 VOTE_TIMEOUT      = 120
 SUCCESS_SOUND_FILE = "success.mp3"
 ADMIN_USERNAME     = "Nexora-WN"
-YOUTUBE_API_KEY    = ""   # Optional: paste your YouTube Data API v3 key here for live stats
+YOUTUBE_API_KEY    = ""   # Optional: YouTube Data API v3 key — enables the
+                          # official chat backend in YouTubeChatSource
+                          # (see the class above). Entered once in the
+                          # GUI, saved to youtube_api_key_config.json.
+YOUTUBE_API_KEY_CONFIG_FILE = "youtube_api_key_config.json"
+
+def load_youtube_api_key_config():
+    global YOUTUBE_API_KEY
+    try:
+        if os.path.exists(YOUTUBE_API_KEY_CONFIG_FILE):
+            with open(YOUTUBE_API_KEY_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            YOUTUBE_API_KEY = data.get("api_key", "").strip()
+            if YOUTUBE_API_KEY:
+                print("[YouTubeAPIKey] Config loaded — official API backend available.")
+    except Exception as e:
+        print(f"[YouTubeAPIKey] Load error: {e}")
+
+def save_youtube_api_key_config():
+    try:
+        with open(YOUTUBE_API_KEY_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump({"api_key": YOUTUBE_API_KEY}, f, indent=2)
+        print("[YouTubeAPIKey] Config saved.")
+    except Exception as e:
+        print(f"[YouTubeAPIKey] Save error: {e}")
 
 # Global bot state (set at runtime from GUI)
 VIDEO_ID = ""
@@ -2585,8 +3188,9 @@ def _realpc_bot_loop():
     if not _PYAUTOGUI_OK:
         _realpc_set_status("pyautogui not installed. Run: pip install pyautogui")
         return
-    if not _PYTCHAT_OK:
-        _realpc_set_status("pytchat not installed. Run: pip install pytchat")
+    if not (_PYTCHAT_OK or _CHAT_DOWNLOADER_OK or (_GOOGLE_API_OK and YOUTUBE_API_KEY)):
+        _realpc_set_status("No chat backend available. Run: pip install pytchat "
+                            "(or chat-downloader / google-api-python-client)")
         return
 
     wl_only   = REALPC_CONFIG.get("whitelist_only", False)
@@ -2597,11 +3201,9 @@ def _realpc_bot_loop():
     pyautogui.PAUSE    = REALPC_CONFIG.get("action_delay", 0.05)
 
     _realpc_set_status(f"Connecting to stream: {vid}")
-    chat = None
-    try:
-        chat = pytchat.create(video_id=vid)
-    except Exception as e:
-        _realpc_set_status(f"Connection failed: {e}")
+    chat = YouTubeChatSource(vid, api_key=YOUTUBE_API_KEY)
+    if not chat.connect():
+        _realpc_set_status("Connection failed.")
         return
 
     _realpc_set_status("Listening — commands: !type  !send  !combo  !click  !move  etc.")
@@ -2611,12 +3213,12 @@ def _realpc_bot_loop():
             _realpc_set_status("Chat ended or disconnected.")
             break
         try:
-            for msg_obj in chat.get().sync_items():
+            for msg_obj in chat.get_messages():
                 if _realpc_stop_event.is_set():
                     break
 
-                user = normalize_username(msg_obj.author.name)
-                msg  = msg_obj.message.strip()
+                user = normalize_username(msg_obj.author_name)
+                msg  = msg_obj.text.strip()
 
                 if not msg or not msg.startswith("!"):
                     continue
@@ -4181,10 +4783,12 @@ class YouTubeChatBot:
 
     def reconnect(self):
         if self.chat:
-            try: self.chat.terminate()
-            except: pass
+            self.chat.terminate()
+        else:
+            self.chat = YouTubeChatSource(self.video_id, api_key=YOUTUBE_API_KEY)
         try:
-            self.chat = pytchat.create(video_id=self.video_id)
+            if not self.chat.connect():
+                raise ConnectionError(f"Could not connect to chat for video_id={self.video_id}")
             if self._reconnect_failures > 0:
                 msg = f"[Bot] Reconnect successful after {self._reconnect_failures} failure(s)."
                 print(msg)
@@ -4246,12 +4850,12 @@ class YouTubeChatBot:
                     break
                 continue
             try:
-                for c in self.chat.get().sync_items():
+                for c in self.chat.get_messages():
                     if bot_stop_event.is_set():
                         break
-                    msg      = c.message.strip()
-                    user     = normalize_username(c.author.name)
-                    is_owner = getattr(c.author, 'isChatOwner', False)
+                    msg      = c.text.strip()
+                    user     = normalize_username(c.author_name)
+                    is_owner = c.is_owner
                     update_overlay(author=user, message=msg, msg_id=c.id)
                     if user in banned_users:
                         if time.time() < banned_users[user]: continue
@@ -4259,7 +4863,7 @@ class YouTubeChatBot:
                     # Whitelist check: if enabled and user not in list (and not owner), skip
                     if whitelist_users and not is_owner and user not in whitelist_users:
                         continue
-                    active_users.add(c.author.name.strip())
+                    active_users.add(c.author_name.strip())
                     print(f"[Chat] [{user}]: {msg}")
 
                     # Live Chat Viewer
@@ -4633,14 +5237,13 @@ class YouTubeChatBotSecondary:
 
     def _reconnect(self):
         if self.chat:
-            try: self.chat.terminate()
-            except: pass
-        try:
-            self.chat = pytchat.create(video_id=self.video_id)
+            self.chat.terminate()
+        else:
+            self.chat = YouTubeChatSource(self.video_id, api_key=YOUTUBE_API_KEY)
+        if self.chat.connect():
             return True
-        except Exception as e:
-            print(f"[MultiStream] Reconnect error ({self.video_id}): {e}")
-            return False
+        print(f"[MultiStream] Reconnect error ({self.video_id})")
+        return False
 
     def run(self):
         print(f"[MultiStream] Listening on: {self.video_id}")
@@ -4651,11 +5254,11 @@ class YouTubeChatBotSecondary:
                         break
                     continue
             try:
-                for c in self.chat.get().sync_items():
+                for c in self.chat.get_messages():
                     if bot_stop_event.is_set():
                         break
-                    msg  = c.message.strip()
-                    user = normalize_username(c.author.name)
+                    msg  = c.text.strip()
+                    user = normalize_username(c.author_name)
                     if user in banned_users and time.time() < banned_users[user]:
                         continue
                     if whitelist_users and user not in whitelist_users:
@@ -5026,6 +5629,7 @@ class NexovativeControlCenter:
         load_custom_commands()
         load_nexoai_config()
         load_vm_danger_filter_config()
+        load_youtube_api_key_config()
         self._build_ui()
         self._setup_konami_code_listener()
 
@@ -5519,7 +6123,7 @@ class NexovativeControlCenter:
                  font=("Segoe UI",12)).grid(row=0, column=2, padx=2)
 
         # VM selector
-        tk.Label(card, text="VirtualBox VM", bg=self.BG2,
+        tk.Label(card, text="VirtualBox VM (optional)", bg=self.BG2,
                  fg=self.TEXTDIM, font=("Segoe UI",9,"bold")).grid(
                  row=1, column=0, sticky="w", padx=(0,8), pady=(10,0))
         self._vm_var = tk.StringVar()
@@ -5531,8 +6135,9 @@ class NexovativeControlCenter:
         ttk.Button(card, text="🔄 Refresh", style="Dim.TButton",
                    command=self._refresh_vm_list).grid(
                    row=1, column=2, pady=(10,0))
-        self._vm_select_note = tk.Label(card, text="", bg=self.BG2,
-                 fg=self.YELLOW, font=("Segoe UI", 8, "italic"))
+        self._vm_select_note = tk.Label(card,
+                 text="Leave blank to run chat-only (no VM control) — YouTube chat works without a VM.",
+                 bg=self.BG2, fg=self.TEXTDIM, font=("Segoe UI", 8, "italic"))
         self._vm_select_note.grid(row=2, column=0, columnspan=3, sticky="w", pady=(2,0))
 
         # Auto-start watchdog toggle
@@ -5569,6 +6174,49 @@ class NexovativeControlCenter:
                       "(e.g. images decoded straight to disk) typed via chat into the VM.",
                  bg=self.BG2, fg=self.TEXTDIM, font=("Segoe UI", 8),
                  justify="left").grid(row=5, column=1, columnspan=2, sticky="w", pady=(0,4))
+
+        # YouTube Data API v3 key (optional) — enables the most reliable
+        # of the three chat backends. See YouTubeChatSource for details.
+        tk.Label(card, text="YouTube API Key", bg=self.BG2,
+                 fg=self.TEXTDIM, font=("Segoe UI",9,"bold")).grid(
+                 row=6, column=0, sticky="w", padx=(0,8), pady=(10,0))
+        api_key_row = tk.Frame(card, bg=self.BG2)
+        api_key_row.grid(row=6, column=1, columnspan=2, sticky="ew", pady=(10,0))
+        self._yt_api_key_var = tk.StringVar(value=YOUTUBE_API_KEY)
+        self._yt_api_key_entry = ttk.Entry(
+            api_key_row, textvariable=self._yt_api_key_var,
+            width=32, font=("Segoe UI Mono", 9), show="•")
+        self._yt_api_key_entry.pack(side="left", ipady=3, fill="x", expand=True)
+        self._yt_api_key_visible = False
+        def _toggle_yt_api_key_visibility():
+            self._yt_api_key_visible = not self._yt_api_key_visible
+            self._yt_api_key_entry.configure(show="" if self._yt_api_key_visible else "•")
+            yt_key_show_btn.configure(text="🙈 Hide" if self._yt_api_key_visible else "👁 Show")
+        yt_key_show_btn = ttk.Button(api_key_row, text="👁 Show", style="Dim.TButton",
+                                      command=_toggle_yt_api_key_visibility)
+        yt_key_show_btn.pack(side="left", padx=(6,0))
+        ttk.Button(api_key_row, text="💾 Save Key", style="Green.TButton",
+                   command=self._save_youtube_api_key).pack(side="left", padx=(6,0))
+        tk.Label(card,
+                 text="Optional. Enables the official YouTube Data API v3 chat backend — "
+                      "the only one Google guarantees won't break, but it uses your API "
+                      "quota. Leave blank to keep using the free (unofficial) backends. "
+                      "Saved locally, entered once.",
+                 bg=self.BG2, fg=self.TEXTDIM, font=("Segoe UI", 8),
+                 justify="left").grid(row=7, column=1, columnspan=2, sticky="w", pady=(2,4))
+
+        # Chat backend picker (auto / official / chat-downloader / pytchat)
+        tk.Label(card, text="Chat Backend", bg=self.BG2,
+                 fg=self.TEXTDIM, font=("Segoe UI",9,"bold")).grid(
+                 row=8, column=0, sticky="w", padx=(0,8), pady=(10,0))
+        backend_row = tk.Frame(card, bg=self.BG2)
+        backend_row.grid(row=8, column=1, columnspan=2, sticky="w", pady=(10,0))
+        self._chat_backend_status_lbl = tk.Label(
+            backend_row, text=f"Currently: {CHAT_BACKEND_PREFERENCE}",
+            bg=self.BG2, fg=self.ACCENT, font=("Segoe UI", 9, "bold"))
+        self._chat_backend_status_lbl.pack(side="left")
+        ttk.Button(backend_row, text="🔀 Change Chat Backend", style="Dim.TButton",
+                   command=self._change_chat_backend).pack(side="left", padx=(10,0))
 
         card.columnconfigure(1, weight=1)
 
@@ -6738,6 +7386,25 @@ class NexovativeControlCenter:
         ttk.Button(win, text="Close", style="Dim.TButton",
                    command=win.destroy).pack(pady=(0, 14))
 
+    def _change_chat_backend(self):
+        _show_chat_backend_dialog()   # blocks until the user picks something
+        self._chat_backend_status_lbl.configure(text=f"Currently: {CHAT_BACKEND_PREFERENCE}")
+
+    def _save_youtube_api_key(self):
+        global YOUTUBE_API_KEY
+        YOUTUBE_API_KEY = self._yt_api_key_var.get().strip()
+        save_youtube_api_key_config()
+        if YOUTUBE_API_KEY:
+            messagebox.showinfo(
+                "YouTube API Key",
+                "Saved. The bot will now try the official YouTube Data API v3 "
+                "backend first on its next (re)connect, falling back to the "
+                "free backends if it fails.")
+        else:
+            messagebox.showinfo(
+                "YouTube API Key",
+                "Cleared. The bot will use the free (unofficial) chat backends only.")
+
     def _on_vm_danger_filter_toggle(self):
         """
         Called when the Main tab's Danger Filter checkbox is clicked.
@@ -6815,7 +7482,8 @@ class NexovativeControlCenter:
                      "The bot uses the VMs configured in the 'OS Voting' tab.")
         else:
             self._vm_combo.configure(state="readonly")
-            self._vm_select_note.configure(text="")
+            self._vm_select_note.configure(
+                text="Leave blank to run chat-only (no VM control) — YouTube chat works without a VM.")
 
     def _on_os_voting_toggle(self):
         self._set_os_rows_enabled(self._os_voting_var.get())
@@ -7076,11 +7744,17 @@ class NexovativeControlCenter:
             VM_NAME = start_vm_name
             current_os_vm = start_vm_name
         else:
+            # VM selection is optional now — the bot can connect to YouTube
+            # chat and run chat-only commands without any VirtualBox VM.
+            # VM-dependent commands (!type, !click, !restart, !revert, etc.)
+            # will simply report "no VM selected" until one is chosen here
+            # or from the Main tab dropdown.
             if not vm:
-                messagebox.showerror("Missing Input", "Please select a VirtualBox VM.")
-                return
+                self._log("ℹ️ No VM selected — starting in chat-only mode. "
+                           "VM commands (!type, !click, !restart, etc.) will be unavailable "
+                           "until a VM is selected.")
             VM_NAME = vm
-            current_os_vm = vm
+            current_os_vm = vm or None
 
         VIDEO_ID = yt
         self._bot_running = True
@@ -7091,11 +7765,12 @@ class NexovativeControlCenter:
         self._console_redir = ConsoleRedirect(self._console)
         self._console_redir.start()
 
-        self._log(f"Starting bot → YT: {VIDEO_ID}  |  VM: {VM_NAME}")
-        notify("Bot Started", f"Listening on: {VIDEO_ID}\nVM: {VM_NAME}")
+        vm_display = VM_NAME or "(none — chat-only mode)"
+        self._log(f"Starting bot → YT: {VIDEO_ID}  |  VM: {vm_display}")
+        notify("Bot Started", f"Listening on: {VIDEO_ID}\nVM: {vm_display}")
         obs_trigger("bot_start")
         _reset_session_stats()
-        _append_event("BOT_START", "system", f"video_id={VIDEO_ID} vm={VM_NAME}")
+        _append_event("BOT_START", "system", f"video_id={VIDEO_ID} vm={VM_NAME or 'none'}")
         if _gui_app is not None:
             try:
                 _gui_app._append_chat_system(f"Bot started — listening on {VIDEO_ID}")
@@ -11133,6 +11808,7 @@ if __name__ == '__main__':
     load_reconnect_config()
     load_nexoai_config()
     load_vm_danger_filter_config()
+    load_youtube_api_key_config()
     _update_splash(97, "Building interface...")
 
     # Reuse the hidden host root that was created alongside the splash.
