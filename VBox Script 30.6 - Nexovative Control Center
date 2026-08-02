@@ -6,6 +6,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 import os
 import sys
+import importlib.util as _importlib_util
 
 # ========================= UAC ELEVATION =========================
 # If not already running as administrator, re-launch with ShellExecuteW
@@ -48,8 +49,8 @@ VERSION = "30.6.0"   # increment this with every release
 
 # Raw URL of version.json in your repo, and the page to send users to
 # when a newer version is available.
-GITHUB_VERSION_URL = "https://raw.githubusercontent.com/NexoUltraProMaxScripts/ChatUsesScripts/refs/heads/main/version.json"
-GITHUB_REPO_PAGE_URL = "https://github.com/NexoUltraProMaxScripts/ChatUsesScripts"
+GITHUB_VERSION_URL = "https://raw.githubusercontent.com/Nexovative-D/ChatUsesScripts/refs/heads/main/version.json"
+GITHUB_REPO_PAGE_URL = "https://github.com/Nexovative-D/ChatUsesScripts"
 
 
 def _check_for_update():
@@ -271,6 +272,290 @@ def _ask_monitor_choice(monitors):
     print(f"[Startup] Monitor selected: {SELECTED_MONITOR}")
 
 
+# ========================= STARTUP DEPENDENCY CHECK =========================
+# Runs once, right after the hidden host root is created and BEFORE the
+# Lite/Full GUI mode picker. Detects which optional pip packages this script
+# uses are missing on the current Python environment, and — if any are
+# missing — offers to install them automatically via `pip install`, with a
+# live per-package progress display. vboxapi is intentionally excluded from
+# the auto-install offer: it isn't a normal PyPI package, it ships with the
+# VirtualBox SDK, so it gets its own informational (non-installable) notice
+# instead.
+#
+# Declining just continues the normal startup — every one of these imports
+# is already wrapped in its own try/except further down, with the relevant
+# feature disabled and a console message if the package is absent. This
+# check only exists to make that same information visible up front, with a
+# one-click fix, instead of the user discovering it feature-by-feature.
+_STARTUP_OPTIONAL_DEPS = [
+    # (import_name, pip_package_name, human_label)
+    ("pytchat",      "pytchat",  "pytchat — reading YouTube live chat"),
+    ("win32com",     "pywin32",  "pywin32 — Windows COM / SAPI text-to-speech"),
+    ("plyer",        "plyer",    "plyer — desktop toast notifications"),
+    ("pystray",      "pystray",  "pystray — system tray icon"),
+    ("PIL",          "pillow",   "Pillow — tray icon image support"),
+    ("pyautogui",    "pyautogui","pyautogui — Real PC Control (mouse/keyboard)"),
+    ("pygame",       "pygame",   "pygame — background music player"),
+    ("psutil",       "psutil",   "psutil — CPU/RAM display & Lite Mode recommendation"),
+]
+
+
+def _find_missing_optional_deps():
+    """Returns a list of (import_name, pip_package_name, human_label) tuples
+    for every optional dependency above that isn't currently importable.
+    Uses find_spec so it doesn't actually import anything yet."""
+    missing = []
+    for import_name, pip_name, label in _STARTUP_OPTIONAL_DEPS:
+        try:
+            found = _importlib_util.find_spec(import_name) is not None
+        except (ImportError, ValueError, ModuleNotFoundError):
+            found = False
+        if not found:
+            missing.append((import_name, pip_name, label))
+    return missing
+
+
+def _vboxapi_present() -> bool:
+    try:
+        return _importlib_util.find_spec("vboxapi") is not None
+    except (ImportError, ValueError, ModuleNotFoundError):
+        return False
+
+
+def _restart_script():
+    """Re-launches the current script fresh (new process replaces this one)
+    so newly-installed packages are actually importable — a running Python
+    process won't pick up a package that pip just installed underneath it."""
+    python = sys.executable
+    os.execv(python, [python] + sys.argv)
+
+
+def _show_vboxapi_only_notice():
+    """
+    Simple info-only popup for the case where every pip-installable
+    optional dependency is present and the ONLY thing missing is vboxapi.
+    There's nothing to offer to install (vboxapi isn't a pip package), so
+    this just informs the user and waits for a single OK — no install/skip
+    choice, since there's no actual decision to make here.
+    """
+    dlg = tk.Toplevel(_host_root)
+    dlg.title("")
+    dlg.resizable(False, False)
+    dlg.overrideredirect(True)
+    W, H = 460, 220
+    sw = dlg.winfo_screenwidth()
+    sh = dlg.winfo_screenheight()
+    x = (sw - W) // 2
+    y = (sh - H) // 2
+    dlg.geometry(f"{W}x{H}+{x}+{y}")
+    dlg.configure(bg="#0f0f1a")
+
+    border = tk.Frame(dlg, bg="#7c5cbf", padx=2, pady=2)
+    border.place(relx=0, rely=0, relwidth=1, relheight=1)
+    inner = tk.Frame(border, bg="#0f0f1a")
+    inner.pack(fill="both", expand=True)
+
+    tk.Label(inner, text="⚠ vboxapi Not Installed",
+             bg="#0f0f1a", fg="#ffffff",
+             font=("Segoe UI", 13, "bold")).pack(pady=(20, 8))
+
+    tk.Label(inner,
+             text="vboxapi can't be installed via pip — it ships with the "
+                  "VirtualBox SDK. VirtualBox mouse/session control will "
+                  "stay disabled until you install it manually from the "
+                  "VirtualBox SDK for your Python environment.\n\n"
+                  "Every other library this script uses is already installed.",
+             bg="#0f0f1a", fg="#e8a33d",
+             font=("Segoe UI", 9), justify="left",
+             wraplength=400).pack(padx=24, pady=(0, 16))
+
+    tk.Button(
+        inner, text="OK", bg="#7c5cbf", fg="#ffffff",
+        activebackground="#a684e8", activeforeground="#ffffff",
+        relief="flat", font=("Segoe UI", 9, "bold"),
+        width=14, height=1, cursor="hand2",
+        command=dlg.destroy,
+    ).pack(pady=(0, 10))
+
+    dlg.lift()
+    dlg.attributes("-topmost", True)
+    dlg.focus_force()
+    dlg.update()
+    dlg.wait_window(dlg)
+
+
+def _run_dependency_check_and_offer_install():
+    """
+    Shown once, right after _host_root is created and before the Lite/Full
+    GUI mode picker. If any optional pip packages are missing, asks the
+    user whether to install them automatically. If they agree, installs
+    each one via `pip install` in turn, showing live progress, then
+    restarts the script so the new packages take effect. If they decline,
+    or nothing is missing, startup just continues as normal.
+
+    Special case: if every pip-installable package is present and vboxapi
+    is the ONLY thing missing, there's no install/skip decision to make
+    (vboxapi can't be pip-installed), so a simple info-only notice is
+    shown instead of the full install dialog.
+    """
+    missing = _find_missing_optional_deps()
+    vbox_ok = _vboxapi_present()
+
+    if not missing and vbox_ok:
+        return  # nothing to report — continue straight to normal startup
+
+    if not missing and not vbox_ok:
+        _show_vboxapi_only_notice()
+        return
+
+    dlg = tk.Toplevel(_host_root)
+    dlg.title("")
+    dlg.resizable(False, False)
+    dlg.overrideredirect(True)
+    W, H = 480, 420
+    sw = dlg.winfo_screenwidth()
+    sh = dlg.winfo_screenheight()
+    x = (sw - W) // 2
+    y = (sh - H) // 2
+    dlg.geometry(f"{W}x{H}+{x}+{y}")
+    dlg.configure(bg="#0f0f1a")
+
+    border = tk.Frame(dlg, bg="#7c5cbf", padx=2, pady=2)
+    border.place(relx=0, rely=0, relwidth=1, relheight=1)
+    inner = tk.Frame(border, bg="#0f0f1a")
+    inner.pack(fill="both", expand=True)
+
+    tk.Label(inner, text="Missing Python Libraries",
+             bg="#0f0f1a", fg="#ffffff",
+             font=("Segoe UI", 14, "bold")).pack(pady=(18, 4))
+
+    if missing:
+        tk.Label(inner,
+                 text=f"{len(missing)} optional package(s) used by this script "
+                      f"aren't installed:",
+                 bg="#0f0f1a", fg="#aaaaaa",
+                 font=("Segoe UI", 9), justify="center",
+                 wraplength=440).pack(pady=(0, 6))
+
+        list_frame = tk.Frame(inner, bg="#1e1e2e")
+        list_frame.pack(fill="x", padx=20, pady=(0, 10))
+        for _, pip_name, label in missing:
+            tk.Label(list_frame, text=f"•  {label}",
+                     bg="#1e1e2e", fg="#f0c060",
+                     font=("Segoe UI", 9), anchor="w",
+                     justify="left", wraplength=400).pack(fill="x", padx=10, pady=2)
+
+    if not vbox_ok:
+        tk.Label(inner,
+                 text="⚠ vboxapi is also missing, but it can't be installed via "
+                      "pip — it ships with the VirtualBox SDK. VirtualBox "
+                      "mouse/session control will stay disabled until you "
+                      "install it manually from the VirtualBox SDK for your "
+                      "Python environment.",
+                 bg="#0f0f1a", fg="#e8a33d",
+                 font=("Segoe UI", 8), justify="left",
+                 wraplength=440).pack(padx=20, pady=(0, 10))
+
+    progress_frame = tk.Frame(inner, bg="#0f0f1a")
+    status_label = tk.Label(progress_frame, text="", bg="#0f0f1a", fg="#cccccc",
+                             font=("Segoe UI", 9))
+    status_label.pack(pady=(4, 4))
+    bar_bg = tk.Frame(progress_frame, bg="#1e1e2e", height=18, width=420)
+    bar_bg.pack_propagate(False)
+    bar_bg.pack(pady=(0, 4))
+    bar_fill = tk.Frame(bar_bg, bg="#3ddc97", height=18, width=0)
+    bar_fill.place(x=0, y=0)
+    pct_label = tk.Label(progress_frame, text="0%", bg="#0f0f1a", fg="#3ddc97",
+                          font=("Segoe UI", 8, "bold"))
+    pct_label.pack()
+
+    result = {"choice": None}   # "install", "skip", or None (window closed)
+
+    def _do_install():
+        btn_row.pack_forget()
+        if missing:
+            info_label.pack_forget()
+        progress_frame.pack(pady=(6, 10))
+        dlg.update()
+
+        total = len(missing)
+        for i, (import_name, pip_name, label) in enumerate(missing, start=1):
+            status_label.configure(text=f"Installing {pip_name}  ({i}/{total})...")
+            dlg.update()
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "--upgrade", pip_name],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                status_label.configure(text=f"✓ Installed {pip_name}  ({i}/{total})")
+            except subprocess.CalledProcessError as e:
+                status_label.configure(text=f"✗ Failed to install {pip_name} — "
+                                             f"see console for details")
+                print(f"[DepInstall] Failed installing {pip_name}: {e.stderr}")
+            dlg.update()
+
+            pct = int((i / total) * 100)
+            bar_fill.configure(width=int(420 * (pct / 100)))
+            pct_label.configure(text=f"{pct}%")
+            dlg.update()
+            time.sleep(0.2)   # brief pause so each step is visible, not a flash
+
+        status_label.configure(text="Done — restarting script...")
+        dlg.update()
+        time.sleep(1.0)
+        result["choice"] = "install"
+        dlg.destroy()
+
+    def _skip_install():
+        result["choice"] = "skip"
+        dlg.destroy()
+
+    info_label = tk.Label(inner,
+             text="Install them automatically now? Each will be installed "
+                  "with pip, one at a time, with progress shown below. "
+                  "You can also skip this — every feature above just stays "
+                  "disabled until you install its package yourself.",
+             bg="#0f0f1a", fg="#888888",
+             font=("Segoe UI", 8), justify="left",
+             wraplength=440)
+    info_label.pack(padx=20, pady=(0, 10))
+
+    btn_row = tk.Frame(inner, bg="#0f0f1a")
+    btn_row.pack(pady=(0, 10))
+
+    if missing:
+        tk.Button(
+            btn_row, text="✅  Install Automatically",
+            bg="#3ddc97", fg="#0f0f1a", activebackground="#5eeab0",
+            activeforeground="#0f0f1a", relief="flat",
+            font=("Segoe UI", 9, "bold"), justify="center",
+            width=20, height=2, cursor="hand2",
+            command=_do_install,
+        ).pack(side="left", padx=(0, 8))
+
+    tk.Button(
+        btn_row, text="Skip  (keep those features disabled)",
+        bg="#1e1e2e", fg="#cccccc", activebackground="#2a2a3e",
+        activeforeground="#ffffff", relief="flat",
+        font=("Segoe UI", 9), justify="center",
+        width=24 if missing else 30, height=2, cursor="hand2",
+        command=_skip_install,
+    ).pack(side="left")
+
+    dlg.lift()
+    dlg.attributes("-topmost", True)
+    dlg.focus_force()
+    dlg.update()
+
+    dlg.wait_window(dlg)
+
+    if result["choice"] == "install":
+        _restart_script()   # never returns — new process takes over
+    # "skip" or window closed some other way -> fall through, startup continues
+
+
 def _ask_startup_mode():
     """
     Shown once, right after the hidden host root is created and before the
@@ -439,6 +724,8 @@ def _create_splash():
 
     monitors = _detect_monitors()
     _ask_monitor_choice(monitors)   # only actually prompts if more than one monitor was found
+
+    _run_dependency_check_and_offer_install()   # offers to pip-install any missing optional packages; restarts the script if the user accepts
 
     _ask_startup_mode()   # user picks Full GUI vs Lite Mode before anything else loads
 
@@ -1805,7 +2092,7 @@ _REALPC_DANGEROUS_TEXT_PATTERNS = [
 # Single keys that are dangerous as a standalone !key / !press regardless of
 # the typing buffer (they act immediately, not via typed text).
 _REALPC_DANGEROUS_KEYS = {
-    "delete", "del", "printscreen",
+    "printscreen",
 }
 
 # Hotkeys that open OS-level surfaces are intentionally NOT hard-blocked here
@@ -5247,14 +5534,18 @@ class NexovativeControlCenter:
         tk.Label(card, text="Danger Filter", bg=self.BG2,
                  fg=self.TEXTDIM, font=("Segoe UI",9,"bold")).grid(
                  row=4, column=0, sticky="w", padx=(0,8), pady=(10,0))
+        danger_row = tk.Frame(card, bg=self.BG2)
+        danger_row.grid(row=4, column=1, columnspan=2, sticky="w", pady=(10,0))
         self._vm_danger_filter_var = tk.BooleanVar(value=VM_DANGER_FILTER_ENABLED)
-        danger_chk = tk.Checkbutton(card,
+        danger_chk = tk.Checkbutton(danger_row,
             text="🛡 Block dangerous commands & base64 payloads typed into the VM",
             variable=self._vm_danger_filter_var, bg=self.BG2, fg=self.TEXT,
             selectcolor=self.BG3, activebackground=self.BG2,
             activeforeground=self.TEXT, font=("Segoe UI", 9),
             command=self._on_vm_danger_filter_toggle)
-        danger_chk.grid(row=4, column=1, columnspan=2, sticky="w", pady=(10,0))
+        danger_chk.pack(side="left")
+        ttk.Button(danger_row, text="📋 View Blocked List", style="Dim.TButton",
+                   command=self._show_blocked_commands_list).pack(side="left", padx=(10,0))
         tk.Label(card,
                  text="Blocks destructive commands and long base64-encoded payloads "
                       "(e.g. images decoded straight to disk) typed via chat into the VM.",
@@ -6371,6 +6662,63 @@ class NexovativeControlCenter:
         AUTO_START_ENABLED = self._auto_start_var.get()
         save_auto_start_config()
         self._log(f"[AutoStart] Watchdog {'enabled' if AUTO_START_ENABLED else 'disabled'} by user.")
+
+    def _show_blocked_commands_list(self):
+        """
+        Shows a read-only popup listing every dangerous text pattern, key,
+        and the base64-blob rule the Danger Filter currently checks against
+        (same list used by both the Real PC and VM filters — they share
+        _REALPC_DANGEROUS_TEXT_PATTERNS). Purely informational — does not
+        edit the list or the filter's on/off state.
+        """
+        win = tk.Toplevel(self.root)
+        win.title("🛡 Danger Filter — Blocked Commands")
+        win.configure(bg=self.BG)
+        win.geometry("560x600")
+        win.transient(self.root)
+
+        tk.Label(win, text="🛡 Danger Filter — Blocked Patterns",
+                 bg=self.BG, fg=self.TEXT, font=("Segoe UI", 12, "bold")
+                 ).pack(anchor="w", padx=14, pady=(14, 2))
+        tk.Label(win,
+                 text="Any of these, typed via chat (in one go, or spelled out "
+                      "across multiple !type/!key steps), is blocked in both "
+                      "Real PC Control and the VM — whenever the Danger Filter "
+                      "is enabled.",
+                 bg=self.BG, fg=self.TEXTDIM, font=("Segoe UI", 9),
+                 wraplength=520, justify="left").pack(anchor="w", padx=14, pady=(0, 10))
+
+        text_frame = tk.Frame(win, bg=self.BG)
+        text_frame.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        scrollbar = tk.Scrollbar(text_frame)
+        scrollbar.pack(side="right", fill="y")
+        listbox_text = tk.Text(text_frame, bg=self.BG2, fg=self.TEXT,
+                                font=("Segoe UI Mono", 9), wrap="word",
+                                yscrollcommand=scrollbar.set, relief="flat",
+                                padx=10, pady=8)
+        listbox_text.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=listbox_text.yview)
+
+        lines = []
+        lines.append(f"Text patterns blocked ({len(_REALPC_DANGEROUS_TEXT_PATTERNS)}):")
+        lines.append("")
+        for p in _REALPC_DANGEROUS_TEXT_PATTERNS:
+            lines.append(f"  • {p}")
+        lines.append("")
+        lines.append(f"Standalone keys blocked ({len(_REALPC_DANGEROUS_KEYS)}):")
+        lines.append("")
+        for k in sorted(_REALPC_DANGEROUS_KEYS):
+            lines.append(f"  • {k}")
+        lines.append("")
+        lines.append(f"Also blocked: any unbroken run of {_REALPC_BASE64_BLOB_MIN_LEN}+ "
+                      f"base64-alphabet characters that statistically looks like "
+                      f"encoded binary data (a long base64 payload).")
+
+        listbox_text.insert("1.0", "\n".join(lines))
+        listbox_text.configure(state="disabled")
+
+        ttk.Button(win, text="Close", style="Dim.TButton",
+                   command=win.destroy).pack(pady=(0, 14))
 
     def _on_vm_danger_filter_toggle(self):
         """
@@ -8353,6 +8701,9 @@ class NexovativeControlCenter:
         )
         danger_cb.pack(side="left")
         self._rpc_danger_filter_cb = danger_cb
+
+        ttk.Button(danger_row, text="📋 View Blocked List", style="Dim.TButton",
+                   command=self._show_blocked_commands_list).pack(side="left", padx=(10, 0))
 
         tk.Label(allow_card,
                  text="This protection is ON by default and is strongly recommended to keep on.",
@@ -10755,63 +11106,6 @@ class NexovativeControlCenter:
 
 
 # ========================= MAIN =========================
-def _report_missing_libraries():
-    """
-    Show a single, friendly summary of any optional/required third-party
-    libraries that failed to import. The GUI still opens either way —
-    this is informational only, never a hard stop.
-    """
-    missing = []
-    if not _PYTCHAT_OK:
-        missing.append(("pytchat", "pip install pytchat",
-                         "Reading YouTube live chat messages"))
-    if not _VBOXAPI_OK:
-        missing.append(("vboxapi", "install the VirtualBox SDK for this Python",
-                         "Direct mouse/session control inside the VM"))
-    if not _WIN32COM_OK:
-        missing.append(("pywin32", "pip install pywin32",
-                         "Text-to-speech (SAPI voice)"))
-    if not _PLYER_OK:
-        missing.append(("plyer", "pip install plyer",
-                         "Windows toast notifications"))
-    if not _PYSTRAY_OK:
-        missing.append(("pystray, pillow", "pip install pystray pillow",
-                         "System tray icon"))
-    if not _PYAUTOGUI_OK:
-        missing.append(("pyautogui", "pip install pyautogui",
-                         "Real PC Control tab (mouse/keyboard automation)"))
-    if not _PYGAME_OK:
-        missing.append(("pygame", "pip install pygame",
-                         "Background music player"))
-    if not _PSUTIL_OK:
-        missing.append(("psutil", "pip install psutil",
-                         "CPU/RAM usage display and Lite Mode recommendation"))
-
-    if not missing:
-        return
-
-    lines = ["Some optional libraries are missing. The app will keep running,",
-             "but the features listed below will be unavailable until you",
-             "install them.\n"]
-    for name, how, feature in missing:
-        lines.append(f"• {name}  —  disables: {feature}")
-        lines.append(f"    install: {how}\n")
-    lines.append("You can install everything at once with:")
-    lines.append("    pip install pytchat pywin32 plyer pystray pillow pyautogui")
-
-    message = "\n".join(lines)
-    print("[Startup] Missing libraries:\n" + message)
-
-    try:
-        import ctypes
-        MB_ICONWARNING = 0x30
-        ctypes.windll.user32.MessageBoxW(
-            0, message, "Missing Optional Libraries", MB_ICONWARNING
-        )
-    except Exception as e:
-        print(f"[Startup] Could not show missing-library dialog: {e}")
-
-
 if __name__ == '__main__':
     load_custom_commands()
     load_user_mgmt()
@@ -10843,8 +11137,6 @@ if __name__ == '__main__':
     root.deiconify()    # NOW show the fully-built main window
     root.lift()
     root.focus_force()
-
-    _report_missing_libraries()   # inform the user of any disabled features, non-blocking
 
     app.show_welcome_guide()   # show user guide on first launch
 
