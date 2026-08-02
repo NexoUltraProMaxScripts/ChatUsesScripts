@@ -3,7 +3,6 @@ import time
 import signal as _signal_module
 import threading as _threading_module
 import tkinter as tk
-import tkinter.font as tkfont
 import os
 import sys
 import importlib.util as _importlib_util
@@ -946,9 +945,6 @@ def _play_splash_outro_animation():
     time.sleep + root.update) so it fits into the existing linear startup
     sequence without needing Tk's event loop to already be running.
     """
-    global _splash_root, _splash_label, _splash_bar_bg, _splash_pct
-    global _splash_title_label, _splash_by_label, _splash_brand_label
-
     if _splash_root is None:
         print("[Splash] outro animation skipped — no splash root")
         return
@@ -1181,8 +1177,6 @@ def _play_extended_intro_animation():
     window) so it can fill the entire display. Fully synchronous, same
     approach as the short animation: time.sleep + root.update() in a loop.
     """
-    global _host_root
-
     if _host_root is None:
         print("[Intro] extended animation skipped — no host root")
         return
@@ -1949,7 +1943,6 @@ _realpc_status_cb    = None        # GUI callback to update status label
 
 
 def load_realpc_config():
-    global REALPC_CONFIG
     try:
         if os.path.exists(REALPC_CONFIG_FILE):
             with open(REALPC_CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -2754,7 +2747,6 @@ PERMISSIONS_CONFIG = {
 }
 
 def load_permissions_config():
-    global PERMISSIONS_CONFIG
     try:
         if os.path.exists(PERMISSIONS_CONFIG_FILE):
             with open(PERMISSIONS_CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -2786,7 +2778,7 @@ SOUND_CONFIG = {
 }
 
 def load_sound_config():
-    global SOUND_CONFIG, SUCCESS_SOUND_FILE
+    global SUCCESS_SOUND_FILE
     try:
         if os.path.exists(SOUND_CONFIG_FILE):
             with open(SOUND_CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -2859,7 +2851,6 @@ NEXOAI_FALLBACK_MODELS = [
 
 
 def load_nexoai_config():
-    global NEXOAI_CONFIG
     try:
         if os.path.exists(NEXOAI_CONFIG_FILE):
             with open(NEXOAI_CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -2963,7 +2954,6 @@ MULTI_STREAM_CONFIG = {
 _multi_stream_bots = []        # list of running YouTubeChatBotSecondary instances
 
 def load_multi_stream_config():
-    global MULTI_STREAM_CONFIG
     try:
         if os.path.exists(MULTI_STREAM_CONFIG_FILE):
             with open(MULTI_STREAM_CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -2992,7 +2982,6 @@ SCHEDULER_CONFIG = {
 _scheduler_last_tick = ""   # "HH:MM" of last scheduler check to avoid double-fire
 
 def load_scheduler_config():
-    global SCHEDULER_CONFIG
     try:
         if os.path.exists(SCHEDULER_CONFIG_FILE):
             with open(SCHEDULER_CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -3079,7 +3068,6 @@ def _run_scheduled_action(action: str, label: str):
 def scheduler_loop():
     """Background thread: fires scheduled tasks at the correct time."""
     global _scheduler_last_tick
-    DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     while not bot_stop_event.is_set():
         if bot_stop_event.wait(15):
             break
@@ -3368,7 +3356,6 @@ OBS_CONFIG = {
 }
 
 def load_obs_config():
-    global OBS_CONFIG
     try:
         if os.path.exists(OBS_CONFIG_FILE):
             with open(OBS_CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -3502,7 +3489,7 @@ def load_appearance_config():
             font_size = data.get("font_size")
             if font_size:
                 NexovativeControlCenter._FONT_SIZE = int(font_size)
-            print(f"[Appearance] Config loaded.")
+            print("[Appearance] Config loaded.")
     except Exception as e:
         print(f"[Appearance] Load error: {e}")
 
@@ -3574,7 +3561,6 @@ RECONNECT_CONFIG = {
 }
 
 def load_reconnect_config():
-    global RECONNECT_CONFIG
     try:
         if os.path.exists(RECONNECT_CONFIG_FILE):
             with open(RECONNECT_CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -3787,7 +3773,7 @@ def switch_os(target_entry, announce=True):
     Retries startvm up to 3 times. If all attempts fail, tries to revive
     the previous (loser) VM so at least something is running.
     """
-    global current_os_vm, VM_NAME, os_switch_in_progress, os_votes, os_vote_start_time
+    global current_os_vm, VM_NAME, os_switch_in_progress, os_vote_start_time
     if not os_switch_lock.acquire(blocking=False):
         print("[OSVoting] Switch already in progress, ignoring duplicate request.")
         return
@@ -3851,7 +3837,7 @@ def switch_os(target_entry, announce=True):
                     attempts=3, delay=4, source="OSVoting/fallback"
                 )
                 if ok2:
-                    update_status(f"Restored previous OS")
+                    update_status("Restored previous OS")
                     notify("Previous OS Restored", "The previous OS was brought back online.")
                     print(f"[OSVoting] Fallback: restored previous VM '{previous_vm}'")
                 else:
@@ -3871,7 +3857,7 @@ def switch_os(target_entry, announce=True):
 
 def os_vote_timeout_checker():
     """Background thread: clears stale OS votes after OS_VOTE_TIMEOUT seconds of inactivity."""
-    global os_votes, os_vote_start_time
+    global os_vote_start_time
     while not bot_stop_event.is_set():
         if bot_stop_event.wait(1):
             break
@@ -4058,7 +4044,7 @@ def update_status(message):
     print(f"[Status] {message}")
 
 def vote_timeout_checker():
-    global vote_restart, vote_revert, ban_votes, restart_start_time, revert_start_time
+    global restart_start_time, revert_start_time
     while not bot_stop_event.is_set():
         if bot_stop_event.wait(1):
             break
@@ -4095,7 +4081,6 @@ def vote_timeout_checker():
     print("[Vote] Timeout checker stopped.")
 
 def watchdog_restart():
-    global revert_in_progress
     while not bot_stop_event.is_set():
         try:
             if not AUTO_START_ENABLED:
@@ -4131,7 +4116,7 @@ def watchdog_restart():
                             update_status("Running")
                             speak_text("Running")
                         else:
-                            log_error("Watchdog", f"Failed to auto-restart VM after 3 attempts", str(err))
+                            log_error("Watchdog", "Failed to auto-restart VM after 3 attempts", str(err))
                             notify("Watchdog: VM Start Failed",
                                    "Could not restart the VM after 3 attempts. Check VirtualBox.",
                                    timeout=10)
@@ -4424,7 +4409,7 @@ class YouTubeChatBot:
                                             notify("VM Restarted", "Restart triggered by owner.")
                                         else:
                                             update_status("Restart failed")
-                                            log_error("Vote/restart", f"Owner restart failed after retries", str(err))
+                                            log_error("Vote/restart", "Owner restart failed after retries", str(err))
                                             notify("Restart Failed", str(err), timeout=6)
                                     finally:
                                         update_votes_json("restartvm", 0, required_votes, 0)
@@ -5229,11 +5214,8 @@ class NexovativeControlCenter:
 
         def _update_scrollbar(event=None):
             try:
-                # get total tab width vs visible width
-                total = sum(nb.tk.call(nb._w, "identify", "tab", nb.index(t))
-                            for t in range(nb.index("end"))) if False else 0
                 nb_w  = nb.winfo_width()
-                # simpler: show scrollbar only when tabs overflow
+                # approximate: show scrollbar only when tabs overflow
                 tab_count  = nb.index("end")
                 # approximate: each tab ~110px
                 est_total  = tab_count * 118
@@ -7167,7 +7149,6 @@ class NexovativeControlCenter:
 
     # ──────────────── Admin CMD ────────────────
     def _send_admin_cmd(self):
-        global revert_in_progress, revert_start_time
         cmd = self._admin_var.get().strip()
         if not cmd: return
         self._admin_var.set("")
@@ -9476,8 +9457,6 @@ class NexovativeControlCenter:
         """Poll the bot's reconnect failure count and update the status label."""
         def _poll():
             try:
-                from threading import enumerate as _tenum
-                bot_threads = [t for t in _tenum() if t.name == "bot_main"]
                 # Find the current YouTubeChatBot instance via _gui_app
                 failures = 0
                 if _gui_app and hasattr(_gui_app, '_bot_instance') and _gui_app._bot_instance:
