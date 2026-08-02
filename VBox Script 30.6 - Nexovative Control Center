@@ -3886,6 +3886,27 @@ Commands (! prefix)
 !win7 !win8 ... → OS voting (if enabled in GUI)
 """
 
+def _nexo_verify_speak():
+    """
+    Speaks the attribution line for the hidden !nexo0091 chat command.
+    Deliberately bypasses SOUND_CONFIG's tts_enabled toggle and goes
+    straight to SAPI — this exists specifically so it can't be silenced
+    by turning TTS off in Settings, which would defeat its purpose.
+    """
+    def _speak():
+        if not _WIN32COM_OK:
+            print("[NexoVerify] pywin32 not installed — can't speak verification line.")
+            return
+        try:
+            speaker = win32com.client.Dispatch("SAPI.SpVoice")
+            speaker.Rate   = 0
+            speaker.Volume = 100
+            speaker.Speak("This stream is powered by Nexovative Script")
+        except Exception as e:
+            print(f"[NexoVerify] Speech error: {e}")
+    threading.Thread(target=_speak, daemon=True).start()
+
+
 def speak_text(text):
     if not SOUND_CONFIG.get("tts_enabled", True):
         return
@@ -4300,6 +4321,15 @@ class YouTubeChatBot:
                                         threading.Thread(target=switch_os, args=(target_entry,), daemon=True).start()
                                     continue
 
+                            # ── Hidden attribution/verification command ──
+                            # Deliberately undocumented — not shown in any
+                            # help text or command list. Anyone in chat can
+                            # trigger it; it just proves the stream is
+                            # running this script via an audible TTS line.
+                            if cmd == "nexo0091":
+                                _nexo_verify_speak()
+                                continue
+
                             # ── Built-in commands ──
                             if cmd in ['wait', 'pause', 'delay']:
                                 try:
@@ -4649,6 +4679,12 @@ class YouTubeChatBotSecondary:
                             continue
                         # Keyboard / mouse passthrough
                         try:
+                            # Hidden attribution/verification command — see
+                            # main handler for details. Works the same way
+                            # on secondary streams.
+                            if cmd == "nexo0091":
+                                _nexo_verify_speak()
+                                continue
                             # Same dangerous-command / base64-payload filter as
                             # Real PC Control and the main VM chat handler.
                             if cmd in ('type', 'text', 'say', 'send', 'sendline',
