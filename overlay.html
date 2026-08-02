@@ -85,6 +85,27 @@
             width: 0%;
             transition: width 0.3s ease;
         }
+
+        /* Attribution watermark — kept minimal and semi-transparent so it
+           doesn't clutter the overlay, but re-injected by JS on every
+           render cycle (see renderWatermark()) so it survives a casual
+           edit of the static HTML below. */
+        #nexovative-credit {
+            margin-top: 8px;
+            text-align: center;
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.4px;
+            color: #ffffff;
+            background: rgba(0,0,0,0.55);
+            border: 1px solid rgba(255,255,255,0.25);
+            border-radius: 8px;
+            padding: 4px 10px;
+            display: block;
+            text-shadow: 0 1px 3px rgba(0,0,0,0.9);
+            user-select: none;
+            pointer-events: none;
+        }
     </style>
 </head>
 <body>
@@ -106,6 +127,8 @@
             <div class="progress-bar" id="revert-bar"></div>
         </div>
     </div>
+
+    <div id="nexovative-credit">Script by @Nexovative</div>
 
     <script>
         const state = {
@@ -172,7 +195,21 @@
             }
         }
 
+        function renderWatermark() {
+            // Re-creates the credit line if it's not present in the DOM —
+            // this runs on every poll cycle, so removing the static HTML
+            // line alone doesn't remove the credit; it just comes back on
+            // the next tick.
+            if (!document.getElementById('nexovative-credit')) {
+                const el = document.createElement('div');
+                el.id = 'nexovative-credit';
+                el.textContent = 'Script by @Nexovative';
+                document.body.appendChild(el);
+            }
+        }
+
         function fetchVotes() {
+            renderWatermark();
             fetch('votes.json?t=' + Date.now())
                 .then(r => r.json())
                 .then(data => {
