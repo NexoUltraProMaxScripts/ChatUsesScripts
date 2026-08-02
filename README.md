@@ -5,6 +5,8 @@
 **Download and install VirtualBox SDK for VBox script: https://download.virtualbox.org/virtualbox/7.2.10/VirtualBoxSDK-7.2.10-174163.zip**
 
 **Download VirtualBox: https://www.virtualbox.org/wiki/Downloads**
+
+**VirusTotal: https://www.virustotal.com/gui/file/7d43b6d86c759ffde5d40b56e8d8cd41acc27986a39032e780f590d8281baa8f?nocache=1**
 ----------------------------------------------------------------------------
 ## ⚠️ Why does my antivirus / a sandbox scanner flag this?
 
