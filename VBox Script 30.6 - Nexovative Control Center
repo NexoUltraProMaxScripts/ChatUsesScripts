@@ -44,7 +44,7 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & UPDATE CHECK =========================
-VERSION = "30.5.0"   # increment this with every release
+VERSION = "30.6.0"   # increment this with every release
 
 # Raw URL of version.json in your repo, and the page to send users to
 # when a newer version is available.
@@ -1724,6 +1724,12 @@ def _realpc_check_cooldown(username: str) -> bool:
 # we still keep scanning right up to that point). Every mutation re-scans the
 # buffer (with whitespace stripped, to catch spaced-out spelling like
 # "s h u t d o w n") against the dangerous pattern list.
+#
+# This list also blocks PowerShell/.NET text-to-speech invocation
+# (System.Speech.Synthesis, SAPI.SpVoice, .Speak()). This isn't a
+# destructive command, but it's the same "chat types something into the
+# VM" risk surface: it lets chat make the machine's own voice read out
+# arbitrary (including abusive) text on stream.
 
 # Substrings that indicate an attempt to run destructive or system-level
 # commands (typed directly, or via Run/terminal opened some other way).
@@ -1734,6 +1740,8 @@ _REALPC_DANGEROUS_TEXT_PATTERNS = [
     "formatc", "formatd", "formate", "del/f", "del/s", "del/q",
     "rd/s", "rmdir/s", "deltree",
     "diskpart", "cleanall",
+    "format", "\\\\.\\physicaldrive", "/fs:ntfs", "/fs:fat32",
+    "vssadmin", "vssadminresize",
     # Power state — shutdown / restart / logoff, all forms
     "shutdown", "logoff",
     "restart-computer", "restart -computer", "restart–computer",
@@ -1745,7 +1753,7 @@ _REALPC_DANGEROUS_TEXT_PATTERNS = [
     "win32shutdown(",
     "bcdedit", "bootrec",
     "regdelete", "regadd", "regedit/s",
-    "netuser", "netlocalgroup",
+    "netuser", "netlocalgroup", "netstop",
     "vssadmindelete", "wbadmindelete",
     "cipher/w",
     "taskkill/f", "stop-process", "kill-9",
@@ -1758,13 +1766,22 @@ _REALPC_DANGEROUS_TEXT_PATTERNS = [
     "invoke-webrequest", "invoke-expression", "iex(",
     "invoke-command",
     "downloadstring", "downloadfile",
-    "certutil-urlcache", "certutil-decode",
-    "mshta.exe", "rundll32.exe",
+    "certutil-urlcache", "certutil-decode", "certutil",
+    "mshta.exe", "rundll32.exe", "regsvr32", "regsvr32.exe",
+    "wscript", "wscript.exe", "cscript", "cscript.exe",
     "attrib+h", "attrib-h",
     "sc.exedelete", "sc.exestop", "sc.execonfig", "sc.execreate",
     "icacls", "takeown/f",
     "schtasks", "at.exe",
     "disable-windowsdefender", "set-mppreference", "-disablerealtimemonitoring",
+    "bitsadmin", "bitsadmin/transfer",
+    "msiexec", "msiexec/i",
+    # PowerShell / .NET text-to-speech — lets chat make the machine's own
+    # voice say arbitrary text out loud (harassment / abuse vector, not a
+    # destructive-command vector, but same "typed into the VM" risk surface)
+    "system.speech", "system.speech.synthesis", "speechsynthesizer",
+    "sapi.spvoice", "spvoice", "createobject(\"sapi.spvoice\")",
+    ".speak(", "speak(",
     # Cross-platform / shell destructive commands
     "rm-rf", "rm-r", "sudorm", ":(){:|:&};:",  # fork bomb
     "mkfs", "ddif=", ">/dev/sda", "chmod-r777", "chmod777/",
