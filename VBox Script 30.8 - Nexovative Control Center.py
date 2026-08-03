@@ -3255,6 +3255,7 @@ def _realpc_bot_loop():
                 segments = [s.strip() for s in _re.split(r'\s+(?=!)', raw_chain)]
                 # Each segment starts with "!" — strip it
                 commands = []
+                _prev_action_was_wait = False
                 for seg in segments:
                     if seg.startswith("!"):
                         seg = seg[1:].strip()
@@ -3263,6 +3264,17 @@ def _realpc_bot_loop():
                     parts  = seg.split(maxsplit=1)
                     action = parts[0].lower()
                     args   = parts[1] if len(parts) > 1 else ""
+
+                    # Skip chained wait/sleep/delay commands that immediately
+                    # follow another wait/sleep/delay — otherwise they stack
+                    # up (e.g. "!wait 5!wait 5!wait 5" sleeps 15s instead of
+                    # 5s). Only the first wait in a run is honored.
+                    _is_wait_action = action in ("wait", "sleep", "delay")
+                    if _is_wait_action and _prev_action_was_wait:
+                        _prev_action_was_wait = _is_wait_action
+                        continue
+                    _prev_action_was_wait = _is_wait_action
+
                     commands.append((action, args))
 
                 if not commands:
@@ -4898,10 +4910,23 @@ class YouTubeChatBot:
 
                     if msg.startswith('!'):
                         chain_parts = [p.strip() for p in msg.split('!') if p.strip()]
+                        _prev_cmd_was_wait = False
                         for part in chain_parts:
                             sub_parts = part.split(maxsplit=1)
                             cmd  = sub_parts[0].lower()
                             args = sub_parts[1] if len(sub_parts) > 1 else ""
+
+                            # Skip chained wait/pause/delay commands that
+                            # immediately follow another wait/pause/delay —
+                            # otherwise they stack up (e.g. "!wait 5!wait 5!wait 5"
+                            # sleeps for 15s instead of 5s). Only the first
+                            # wait in a run is honored; the rest are ignored.
+                            _is_wait_cmd = cmd in ('wait', 'pause', 'delay')
+                            if _is_wait_cmd and _prev_cmd_was_wait:
+                                _prev_cmd_was_wait = _is_wait_cmd
+                                continue
+                            _prev_cmd_was_wait = _is_wait_cmd
+
                             _record_command(cmd, user)
 
                             # ── Custom command check (first priority) ──
