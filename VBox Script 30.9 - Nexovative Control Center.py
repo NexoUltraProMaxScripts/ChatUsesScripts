@@ -82,7 +82,7 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & UPDATE CHECK =========================
-VERSION = "30.8.0"   # increment this with every release
+VERSION = "30.9.0"   # increment this with every release
 
 # Raw URL of version.json in your repo, and the page to send users to
 # when a newer version is available.
@@ -4298,13 +4298,15 @@ def update_os_vote_status():
         name_style = "color:#3ddc97;font-weight:bold;" if is_cur else ""
         rows += f"""
         <div class="row">
-          <div class="label" style="{name_style}">{entry['name']}
-            <span class="trigger">!{trig}</span>
+          <div class="label-line">
+            <span class="label" style="{name_style}">{entry['name']}</span>
+            <span class="count" style="color:{bar_col};">{count}<span class="sep">/</span>{OS_VOTE_REQUIRED}</span>
           </div>
-          <div class="bar-wrap">
-            <div class="bar" style="width:{pct}%;background:{bar_col};"></div>
+          <div class="bar-line">
+            <div class="bar-wrap">
+              <div class="bar" style="width:{pct}%;background:{bar_col};"></div>
+            </div>
           </div>
-          <div class="count" style="color:{bar_col};">{count}<span class="sep">/</span>{OS_VOTE_REQUIRED}</div>
         </div>"""
 
     html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
@@ -4319,69 +4321,77 @@ def update_os_vote_status():
     #panel{{
       background:rgba(10,10,20,0.82);
       border:1px solid rgba(124,92,191,0.5);
-      border-radius:16px;
-      padding:18px 22px 14px;
-      min-width:340px;
-      max-width:420px;
+      border-radius:18px;
+      padding:20px 22px 16px;
+      min-width:260px;
+      max-width:320px;
       backdrop-filter:blur(6px);
     }}
     #title{{
-      font-size:22px;
+      font-size:26px;
       font-weight:700;
       color:#b39ddb;
       letter-spacing:1px;
       text-align:center;
-      margin-bottom:4px;
+      margin-bottom:6px;
     }}
     #current{{
-      font-size:13px;
+      font-size:16px;
       color:#3ddc97;
       text-align:center;
-      margin-bottom:14px;
+      margin-bottom:16px;
       opacity:0.9;
     }}
     .row{{
       display:flex;
-      align-items:center;
-      gap:10px;
-      margin-bottom:9px;
+      flex-direction:column;
+      gap:6px;
+      margin-bottom:14px;
+    }}
+    .label-line{{
+      display:flex;
+      align-items:baseline;
+      justify-content:space-between;
     }}
     .label{{
-      font-size:15px;
+      font-size:19px;
       font-weight:600;
-      min-width:120px;
-      flex-shrink:0;
       white-space:nowrap;
       overflow:hidden;
       text-overflow:ellipsis;
     }}
     .trigger{{
-      font-size:11px;
+      font-size:13px;
       color:#aaa;
       font-weight:400;
-      margin-left:5px;
+      margin-left:6px;
+    }}
+    .bar-line{{
+      display:flex;
+      align-items:center;
+      gap:10px;
     }}
     .bar-wrap{{
       flex:1;
       background:rgba(255,255,255,0.1);
-      border-radius:8px;
-      height:16px;
+      border-radius:9px;
+      height:20px;
       overflow:hidden;
     }}
     .bar{{
       height:100%;
-      border-radius:8px;
+      border-radius:9px;
       transition:width 0.4s ease;
       min-width:4px;
     }}
     .count{{
-      font-size:16px;
+      font-size:19px;
       font-weight:700;
-      min-width:36px;
+      min-width:46px;
       text-align:right;
     }}
     .sep{{color:rgba(255,255,255,0.3);font-weight:300;margin:0 1px;}}
-    #empty{{color:#888;font-size:13px;text-align:center;padding:8px 0;}}
+    #empty{{color:#888;font-size:16px;text-align:center;padding:8px 0;}}
     </style></head><body>
     <div id="panel">
       <div id="title">&#128229; OS Vote</div>
