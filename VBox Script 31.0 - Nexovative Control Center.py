@@ -82,7 +82,7 @@ if not _is_admin():
     sys.exit(0)
 
 # ========================= VERSION & UPDATE CHECK =========================
-VERSION = "30.9.0"   # increment this with every release
+VERSION = "31.0.0"   # increment this with every release
 
 # Raw URL of version.json in your repo, and the page to send users to
 # when a newer version is available.
@@ -2300,12 +2300,28 @@ def execute_custom_command(trigger):
                 else:
                     send_keyboard(k)
             elif action in ("keydown", "hold"):
-                k = args.lower().strip()
+                # args can be just a key name ("shift") or "key duration"
+                # ("shift 2") to auto-release after N seconds. Whatever is
+                # asked for is capped at 5s — this key WILL be released
+                # automatically even if no separate "release"/"keyup" step
+                # ever follows, so a forgotten (or malicious) custom
+                # command can never leave a key stuck down in the VM
+                # indefinitely.
+                parts = args.lower().split()
+                k = parts[0].strip() if parts else ""
+                try:
+                    hold_seconds = float(parts[1]) if len(parts) > 1 else 1.0
+                except ValueError:
+                    hold_seconds = 1.0
+                hold_seconds = max(0.05, min(hold_seconds, 5.0))
+
                 if k in SCANCODES:
                     send_scancode(SCANCODES[k][0])
+                    _schedule_key_auto_release(k, hold_seconds)
             elif action in ("keyup", "release"):
                 k = args.lower().strip()
                 if k in SCANCODES:
+                    _cancel_key_auto_release(k)
                     send_scancode(SCANCODES[k][1])
             elif action in ("wait", "pause", "delay"):
                 try:
@@ -2417,8 +2433,17 @@ SCANCODES = {
     "backspace": ("0e","8e"), "delete": ("53","d3"), "del": ("53","d3"),
     "insert": ("52","d2"), "home": ("47","c7"), "end": ("4f","cf"),
     "pageup": ("49","c9"), "pagedown": ("51","d1"),
+    # Generic (unspecified-side) modifiers — kept for backward compatibility,
+    # all map to the LEFT-side key, same as before.
     "ctrl": ("1d","9d"), "alt": ("38","b8"), "shift": ("2a","aa"), "capslock": ("3a","ba"),
     "win": ("e05b","e0db"), "super": ("e05b","e0db"),
+    # Left/right-distinguished modifiers — real physical keyboards have two
+    # of each, and some shortcuts specifically need the right-hand one
+    # (e.g. AltGr on non-US layouts is physically "ralt").
+    "lctrl": ("1d","9d"), "rctrl": ("e01d","e09d"),
+    "lalt": ("38","b8"), "ralt": ("e038","e0b8"), "altgr": ("e038","e0b8"),
+    "lshift": ("2a","aa"), "rshift": ("36","b6"),
+    "lwin": ("e05b","e0db"), "rwin": ("e05c","e0dc"),
     "f1": ("3b","bb"), "f2": ("3c","bc"), "f3": ("3d","bd"), "f4": ("3e","be"),
     "f5": ("3f","bf"), "f6": ("40","c0"), "f7": ("41","c1"), "f8": ("42","c2"),
     "f9": ("43","c3"), "f10": ("44","c4"), "f11": ("57","d7"), "f12": ("58","d8"),
@@ -2433,6 +2458,37 @@ SCANCODES = {
     "0": ("0b","8b"), "1": ("02","82"), "2": ("03","83"), "3": ("04","84"),
     "4": ("05","85"), "5": ("06","86"), "6": ("07","87"), "7": ("08","88"),
     "8": ("09","89"), "9": ("0a","8a"),
+    # Punctuation / symbol row — main-keyboard (non-numpad) keys, US layout
+    "minus": ("0c","8c"), "dash": ("0c","8c"), "hyphen": ("0c","8c"),
+    "equal": ("0d","8d"), "equals": ("0d","8d"), "plus": ("0d","8d"),
+    "lbracket": ("1a","9a"), "leftbracket": ("1a","9a"), "[": ("1a","9a"),
+    "rbracket": ("1b","9b"), "rightbracket": ("1b","9b"), "]": ("1b","9b"),
+    "backslash": ("2b","ab"), "\\": ("2b","ab"),
+    "semicolon": ("27","a7"), ";": ("27","a7"),
+    "quote": ("28","a8"), "apostrophe": ("28","a8"), "'": ("28","a8"),
+    "grave": ("29","a9"), "backtick": ("29","a9"), "tilde": ("29","a9"), "`": ("29","a9"),
+    "comma": ("33","b3"), ",": ("33","b3"),
+    "period": ("34","b4"), "dot": ("34","b4"), ".": ("34","b4"),
+    "slash": ("35","b5"), "forwardslash": ("35","b5"), "/": ("35","b5"),
+    # Numpad
+    "num0": ("52","d2"), "num1": ("4f","cf"), "num2": ("50","d0"), "num3": ("51","d1"),
+    "num4": ("4b","cb"), "num5": ("4c","cc"), "num6": ("4d","cd"), "num7": ("47","c7"),
+    "num8": ("48","c8"), "num9": ("49","c9"),
+    "numlock": ("45","c5"),
+    "numdivide": ("e035","e0b5"), "numdiv": ("e035","e0b5"),
+    "nummultiply": ("37","b7"), "nummul": ("37","b7"),
+    "numsubtract": ("4a","ca"), "numminus": ("4a","ca"),
+    "numadd": ("4e","ce"), "numplus": ("4e","ce"),
+    "numdecimal": ("53","d3"), "numdot": ("53","d3"),
+    "numenter": ("e01c","e09c"),
+    # Misc / navigation / system
+    "printscreen": ("e02ae037","e0b7e0aa"), "prtsc": ("e02ae037","e0b7e0aa"),
+    "scrolllock": ("46","c6"),
+    "pause": ("e11d45e19dc5", ""),   # Pause/Break has no separate release code — the full press+release is one 6-byte make sequence, sent as "down"; "up" is an intentional no-op
+    "menu": ("e05d","e0dd"), "apps": ("e05d","e0dd"), "contextmenu": ("e05d","e0dd"),
+    # Media / volume — useful for muting/adjusting a stream's audio source
+    "volumeup": ("e030","e0b0"), "volumedown": ("e02e","e0ae"), "volumemute": ("e020","e0a0"),
+    "mediaplaypause": ("e022","e0a2"), "medianext": ("e019","e099"), "mediaprev": ("e010","e090"),
 }
 
 def send_combo(keys):
@@ -2633,72 +2689,189 @@ def _realpc_check_cooldown(username: str) -> bool:
 # commands (typed directly, or via Run/terminal opened some other way).
 # Matching is case-insensitive and checked with whitespace fully stripped,
 # so spacing/chunking tricks don't bypass it.
-_REALPC_DANGEROUS_TEXT_PATTERNS = [
+_REALPC_DANGEROUS_TEXT_PATTERNS_WITH_DESC = [
     # Windows destructive / system commands
-    "formatc", "formatd", "formate", "del/f", "del/s", "del/q",
-    "rd/s", "rmdir/s", "deltree",
-    "diskpart", "cleanall",
-    "format", "\\\\.\\physicaldrive", "/fs:ntfs", "/fs:fat32",
-    "vssadmin", "vssadminresize",
+    ("formatc", "Formats (wipes) the C: drive"),
+    ("formatd", "Formats (wipes) the D: drive"),
+    ("formate", "Formats (wipes) the E: drive"),
+    ("del/f", "Force-deletes files, bypassing the normal delete confirmation"),
+    ("del/s", "Deletes files recursively through subfolders"),
+    ("del/q", "Deletes files silently, no confirmation prompt"),
+    ("rd/s", "Deletes an entire folder and everything inside it"),
+    ("rmdir/s", "Deletes an entire folder and everything inside it"),
+    ("deltree", "Deletes an entire folder tree at once"),
+    ("diskpart", "Windows disk partitioning tool — can wipe/repartition drives"),
+    ("cleanall", "Diskpart command that wipes a drive completely"),
+    ("format", "Formats (wipes) a drive"),
+    ("\\\\.\\physicaldrive", "Direct raw access to a physical disk, bypassing normal file protections"),
+    ("/fs:ntfs", "Filesystem-format flag used together with 'format' to wipe a drive"),
+    ("/fs:fat32", "Filesystem-format flag used together with 'format' to wipe a drive"),
+    ("vssadmin", "Manages Windows shadow copies (backups) — can delete them"),
+    ("vssadminresize", "Shrinks shadow-copy storage, destroying backup history"),
     # Power state — shutdown / restart / logoff, all forms
-    "shutdown", "logoff",
-    "restart-computer", "restart -computer", "restart–computer",
-    "stop-computer", "stop -computer",
-    "restart-service", "stop-service",
-    "shutdown.exe", "shutdown/r", "shutdown/s", "shutdown-r", "shutdown-s",
-    "-computerlocalhost", "win32_operatingsystem",   # WMI/CIM reboot vector
-    "invoke-cimmethod", "invoke-wmimethod",
-    "win32shutdown(",
-    "bcdedit", "bootrec",
-    "regdelete", "regadd", "regedit/s",
-    "netuser", "netlocalgroup", "netstop",
-    "vssadmindelete", "wbadmindelete",
-    "cipher/w",
-    "taskkill/f", "stop-process", "kill-9",
-    "wmic",
+    ("shutdown", "Turns the computer off"),
+    ("logoff", "Logs the current user out"),
+    ("restart-computer", "PowerShell command that reboots the machine"),
+    ("restart -computer", "PowerShell command that reboots the machine"),
+    ("restart–computer", "PowerShell command that reboots the machine (en-dash variant)"),
+    ("stop-computer", "PowerShell command that shuts the machine down"),
+    ("stop -computer", "PowerShell command that shuts the machine down"),
+    ("restart-service", "Restarts a Windows service, can disrupt anything running"),
+    ("stop-service", "Stops a Windows service, can disrupt anything running"),
+    ("shutdown.exe", "Turns the computer off"),
+    ("shutdown/r", "Reboots the computer"),
+    ("shutdown/s", "Shuts the computer down"),
+    ("shutdown-r", "Reboots the computer"),
+    ("shutdown-s", "Shuts the computer down"),
+    ("-computerlocalhost", "Targets the local machine in a WMI reboot/shutdown command"),
+    ("win32_operatingsystem", "WMI object used to trigger a remote-style reboot/shutdown"),
+    ("invoke-cimmethod", "Runs a low-level Windows management command — can reboot/shutdown"),
+    ("invoke-wmimethod", "Runs a low-level Windows management command — can reboot/shutdown"),
+    ("win32shutdown(", "Direct WMI call that shuts down or reboots the machine"),
+    ("bcdedit", "Edits Windows boot configuration — can break the ability to start up"),
+    ("bootrec", "Repairs/rewrites the Windows boot sector — can break startup if misused"),
+    ("regdelete", "Deletes a Windows Registry key — can break the OS"),
+    ("regadd", "Adds/changes a Windows Registry key — can break the OS or add malicious settings"),
+    ("regedit/s", "Silently imports a registry file with no confirmation prompt"),
+    ("netuser", "Creates/deletes/changes Windows user accounts"),
+    ("netlocalgroup", "Adds/removes users from admin or other local groups"),
+    ("netstop", "Stops a Windows service"),
+    ("vssadmindelete", "Permanently deletes Windows shadow-copy backups"),
+    ("wbadmindelete", "Permanently deletes Windows Backup system data"),
+    ("cipher/w", "Overwrites deleted file remnants — used to make data unrecoverable"),
+    ("taskkill/f", "Force-kills a running program with no warning"),
+    ("stop-process", "PowerShell command that force-kills a running program"),
+    ("kill-9", "Force-kills a running program immediately (Linux/macOS)"),
+    ("wmic", "Windows management command-line tool — can shut down, kill processes, etc."),
     # PowerShell invocation / obfuscation / remote-exec tricks
-    "powershell.exe", "powershell-", "pwsh.exe", "iwr(", "irm(",
-    "-encodedcommand", "-enc ", "-ec ",
-    "executionpolicybypass", "windowstylehidden", "-windowstylehidden",
-    "-noprofile",
-    "invoke-webrequest", "invoke-expression", "iex(",
-    "invoke-command",
-    "downloadstring", "downloadfile",
-    "certutil-urlcache", "certutil-decode", "certutil",
-    "mshta.exe", "rundll32.exe", "regsvr32", "regsvr32.exe",
-    "wscript", "wscript.exe", "cscript", "cscript.exe",
-    "attrib+h", "attrib-h",
-    "sc.exedelete", "sc.exestop", "sc.execonfig", "sc.execreate",
-    "icacls", "takeown/f",
-    "schtasks", "at.exe",
-    "disable-windowsdefender", "set-mppreference", "-disablerealtimemonitoring",
-    "bitsadmin", "bitsadmin/transfer",
-    "msiexec", "msiexec/i",
+    ("powershell.exe", "Launches PowerShell, which can run almost any system command"),
+    ("powershell-", "Launches PowerShell with a flag/argument attached"),
+    ("pwsh.exe", "Launches PowerShell 7+ (cross-platform edition)"),
+    ("iwr(", "PowerShell shorthand for downloading a file/page from the internet"),
+    ("irm(", "PowerShell shorthand for downloading and often auto-running remote content"),
+    ("-encodedcommand", "Runs a PowerShell command hidden inside base64 encoding"),
+    ("-enc ", "Short form of -EncodedCommand — hides a PowerShell command in base64"),
+    ("-ec ", "Short form of -EncodedCommand — hides a PowerShell command in base64"),
+    ("executionpolicybypass", "Disables PowerShell's safety checks before running a script"),
+    ("windowstylehidden", "Runs a command with its window hidden from view"),
+    ("-windowstylehidden", "Runs a command with its window hidden from view"),
+    ("-noprofile", "Runs PowerShell stripped-down, often used to avoid logging/tracing"),
+    ("invoke-webrequest", "PowerShell command that downloads a file/page from the internet"),
+    ("invoke-expression", "Runs arbitrary text as a PowerShell command — classic malware technique"),
+    ("iex(", "Shorthand for Invoke-Expression — runs arbitrary text as a command"),
+    ("invoke-command", "Runs a command, optionally on a remote machine"),
+    ("downloadstring", "Downloads text/code from the internet directly into memory"),
+    ("downloadfile", "Downloads a file from the internet to disk"),
+    ("certutil-urlcache", "Abuses a Windows certificate tool to download files from the internet"),
+    ("certutil", "Windows certificate tool, commonly abused to download or decode files"),
+    ("mshta.exe", "Runs HTML/JavaScript applications with full system access"),
+    ("rundll32.exe", "Runs code from a DLL file — a very common way to launch hidden payloads"),
+    ("regsvr32", "Registers a DLL — can be abused to run malicious code while looking legitimate"),
+    ("regsvr32.exe", "Registers a DLL — can be abused to run malicious code while looking legitimate"),
+    ("wscript", "Runs VBScript/JScript files with full system access"),
+    ("wscript.exe", "Runs VBScript/JScript files with full system access"),
+    ("cscript", "Runs VBScript/JScript files from the command line"),
+    ("cscript.exe", "Runs VBScript/JScript files from the command line"),
+    # Script interpreters — a chat-controlled Real PC/VM bot has no
+    # legitimate reason to invoke a general-purpose interpreter at all;
+    # blocking the interpreter itself closes off whatever that language's
+    # standard library can do (file writes, base64 decode, sockets, etc.)
+    # without having to separately blocklist every module/function it
+    # offers, which we'd never fully enumerate anyway.
+    # NOTE: the scan function strips ALL whitespace from both the typed
+    # text and these patterns before comparing, so "python" alone already
+    # matches "python.exe", "python3.exe", "python -c ...", etc. — no
+    # need for separate entries per variant.
+    ("python", "Launches the Python interpreter — can run essentially any code"),
+    ("py.exe", "Windows' Python launcher — can run essentially any code"),
+    ("py-c", "Runs a one-line Python command directly from the command line"),
+    ("perl", "Launches the Perl interpreter — can run essentially any code"),
+    ("ruby", "Launches the Ruby interpreter — can run essentially any code"),
+    ("node.exe", "Launches Node.js (JavaScript) — can run essentially any code"),
+    ("node-e", "Runs a one-line Node.js command directly from the command line"),
+    ("attrib+h", "Hides a file from normal view in File Explorer"),
+    ("attrib-h", "Un-hides a hidden file"),
+    ("sc.exedelete", "Deletes a Windows service"),
+    ("sc.exestop", "Stops a Windows service"),
+    ("sc.execonfig", "Reconfigures a Windows service (e.g. to auto-run something)"),
+    ("sc.execreate", "Creates a new Windows service — a common persistence technique"),
+    ("icacls", "Changes file/folder permissions — can lock out or expose files"),
+    ("takeown/f", "Force-takes ownership of a file/folder, bypassing normal permissions"),
+    ("schtasks", "Schedules a task to run automatically — a common persistence technique"),
+    ("at.exe", "Old Windows task scheduler — same persistence risk as schtasks"),
+    ("disable-windowsdefender", "Turns off Windows' built-in antivirus"),
+    ("set-mppreference", "Changes Windows Defender antivirus settings"),
+    ("-disablerealtimemonitoring", "Turns off Windows Defender's real-time virus scanning"),
+    ("bitsadmin", "Windows background file-transfer tool, often abused to download malware"),
+    ("bitsadmin/transfer", "Downloads a file in the background using Windows' BITS service"),
+    ("msiexec", "Installs/runs an MSI installer package — can install unwanted software"),
+    ("msiexec/i", "Silently installs an MSI installer package"),
     # PowerShell / .NET text-to-speech — lets chat make the machine's own
     # voice say arbitrary text out loud (harassment / abuse vector, not a
     # destructive-command vector, but same "typed into the VM" risk surface)
-    "system.speech", "system.speech.synthesis", "speechsynthesizer",
-    "sapi.spvoice", "spvoice", "createobject(\"sapi.spvoice\")",
-    ".speak(", "speak(",
+    ("system.speech", ".NET text-to-speech library — lets chat make the PC speak arbitrary text aloud"),
+    ("system.speech.synthesis", ".NET text-to-speech library — lets chat make the PC speak arbitrary text aloud"),
+    ("speechsynthesizer", ".NET text-to-speech object — lets chat make the PC speak arbitrary text aloud"),
+    ("sapi.spvoice", "Windows text-to-speech engine — lets chat make the PC speak arbitrary text aloud"),
+    ("spvoice", "Windows text-to-speech engine — lets chat make the PC speak arbitrary text aloud"),
+    ("createobject(\"sapi.spvoice\")", "Creates a text-to-speech object to make the PC speak arbitrary text"),
+    (".speak(", "Text-to-speech command — makes the PC say arbitrary/abusive text out loud"),
+    ("speak(", "Text-to-speech command — makes the PC say arbitrary/abusive text out loud"),
     # Cross-platform / shell destructive commands
-    "rm-rf", "rm-r", "sudorm", ":(){:|:&};:",  # fork bomb
-    "mkfs", "ddif=", ">/dev/sda", "chmod-r777", "chmod777/",
-    "sudodd", "sudomkfs",
-    "sudoshutdown", "sudoreboot", "sudohalt", "sudopoweroff",
-    "systemctlreboot", "systemctlpoweroff", "systemctlhalt",
-    "sudoinit0", "sudoinit6", "telinit0", "telinit6",
+    ("rm-rf", "Recursively force-deletes files/folders with no confirmation (Linux/macOS)"),
+    ("rm-r", "Recursively deletes files/folders (Linux/macOS)"),
+    ("sudorm", "Deletes files/folders with admin rights (Linux/macOS)"),
+    (":(){:|:&};:", "A 'fork bomb' — rapidly clones itself until the system crashes"),
+    ("mkfs", "Formats (wipes) a disk partition (Linux/macOS)"),
+    ("ddif=", "Low-level disk-copy command that can overwrite an entire drive"),
+    (">/dev/sda", "Redirects data to overwrite a raw disk device directly"),
+    ("chmod-r777", "Makes all files fully open to read/write/execute by anyone"),
+    ("chmod777/", "Makes files fully open to read/write/execute by anyone"),
+    ("sudodd", "Runs the disk-overwrite 'dd' command with admin rights"),
+    ("sudomkfs", "Formats (wipes) a disk partition with admin rights"),
+    ("sudoshutdown", "Shuts the computer down with admin rights (Linux/macOS)"),
+    ("sudoreboot", "Reboots the computer with admin rights (Linux/macOS)"),
+    ("sudohalt", "Halts the computer with admin rights (Linux/macOS)"),
+    ("sudopoweroff", "Powers off the computer with admin rights (Linux/macOS)"),
+    ("systemctlreboot", "Reboots the computer (Linux)"),
+    ("systemctlpoweroff", "Powers off the computer (Linux)"),
+    ("systemctlhalt", "Halts the computer (Linux)"),
+    ("sudoinit0", "Shuts the computer down via the old init system (Linux)"),
+    ("sudoinit6", "Reboots the computer via the old init system (Linux)"),
+    ("telinit0", "Shuts the computer down via the old init system (Linux)"),
+    ("telinit6", "Reboots the computer via the old init system (Linux)"),
     # Generic dangerous download/exec chains
-    "curlhttp", "wgethttp", "curl-o", "wget-o", "curl-s", "|bash", "|sh",
+    ("curlhttp", "Downloads content from a URL"),
+    ("wgethttp", "Downloads content from a URL"),
+    ("curl-o", "Downloads a file from the internet and saves it to disk"),
+    ("wget-o", "Downloads a file from the internet and saves it to disk"),
+    ("curl-s", "Downloads content silently, hiding progress/errors"),
+    ("|bash", "Pipes downloaded content straight into a shell to run it immediately"),
+    ("|sh", "Pipes downloaded content straight into a shell to run it immediately"),
     # Base64 decode-to-file primitives — the actual "no internet needed"
     # vector: the payload (e.g. an image) is embedded as base64 text
     # directly in the typed command, then decoded straight to a file and
     # opened. None of this touches the network, so it's invisible to any
     # filter that only looks for download/exec commands.
-    "frombase64string", "convert::frombase64string",
-    "writeallbytes", "io.file::writeallbytes", "[io.file]::writeallbytes",
-    "set-contentencoding", "-encodingbyte", "out-fileencoding",
-    "certutil-decode", "certreq-decode",
+    ("frombase64string", "Decodes base64 text back into raw file data (e.g. a hidden image)"),
+    ("convert::frombase64string", "Decodes base64 text back into raw file data (e.g. a hidden image)"),
+    ("writeallbytes", "Writes raw decoded data straight to a file on disk"),
+    ("io.file::writeallbytes", "Writes raw decoded data straight to a file on disk"),
+    ("[io.file]::writeallbytes", "Writes raw decoded data straight to a file on disk"),
+    ("set-contentencoding", "Writes raw byte data to a file using PowerShell"),
+    ("-encodingbyte", "Flag that tells PowerShell to write raw byte data to a file"),
+    ("out-fileencoding", "Writes output to a file with a specific (often binary) encoding"),
+    ("certutil-decode", "Abuses a Windows certificate tool to decode base64 into a file"),
+    ("certreq-decode", "Abuses a Windows certificate tool to decode base64 into a file"),
+    # Python equivalents of the above — belt-and-suspenders on top of the
+    # interpreter block itself being blocked, in case "python" is ever
+    # unblocked via the Danger Filter's per-pattern checkboxes.
+    ("base64.b64decode", "Python function that decodes base64 text back into raw file data"),
+    ("base64.decodebytes", "Python function that decodes base64 text back into raw file data"),
+    ("base64.decode", "Python function that decodes base64 text back into raw file data"),
+    ("importbase64", "Loads Python's base64 module, needed to decode a hidden payload"),
 ]
+_REALPC_DANGEROUS_TEXT_PATTERNS = [p for p, _ in _REALPC_DANGEROUS_TEXT_PATTERNS_WITH_DESC]
 
 # Single keys that are dangerous as a standalone !key / !press regardless of
 # the typing buffer (they act immediately, not via typed text).
@@ -2729,6 +2902,51 @@ _REALPC_BUFFER_MAX_LEN = 4000
 # mix in spaces, slashes, or other separators well before that length.
 _REALPC_BASE64_BLOB_MIN_LEN = 60
 _REALPC_BASE64_BLOB_RE = re.compile(r"[A-Za-z0-9+/]{%d,}={0,2}" % _REALPC_BASE64_BLOB_MIN_LEN)
+
+# ── User-controlled unblock overrides ──
+# Patterns/keys the operator has explicitly unchecked in the "View Blocked
+# List" popup (Main tab / Real PC tab). Anything in these sets is skipped
+# by the scan functions below — everything else in
+# _REALPC_DANGEROUS_TEXT_PATTERNS / _REALPC_DANGEROUS_KEYS stays blocked by
+# default, same as before this feature existed. Persisted so choices
+# survive a restart.
+_REALPC_UNBLOCKED_PATTERNS_FILE = "realpc_unblocked_patterns.json"
+_REALPC_UNBLOCKED_PATTERNS = set()   # subset of _REALPC_DANGEROUS_TEXT_PATTERNS
+_REALPC_UNBLOCKED_KEYS     = set()   # subset of _REALPC_DANGEROUS_KEYS
+_REALPC_BASE64_RULE_ENABLED = True   # separate on/off for the base64-blob heuristic specifically
+
+
+def load_realpc_unblocked_patterns():
+    global _REALPC_UNBLOCKED_PATTERNS, _REALPC_UNBLOCKED_KEYS, _REALPC_BASE64_RULE_ENABLED
+    try:
+        if os.path.exists(_REALPC_UNBLOCKED_PATTERNS_FILE):
+            with open(_REALPC_UNBLOCKED_PATTERNS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # Only keep entries that still exist in the current pattern/key
+            # lists — if a future version removes or renames a pattern, a
+            # stale saved override just quietly drops instead of doing
+            # nothing forever.
+            _REALPC_UNBLOCKED_PATTERNS = set(data.get("patterns", [])) & set(_REALPC_DANGEROUS_TEXT_PATTERNS)
+            _REALPC_UNBLOCKED_KEYS     = set(data.get("keys", []))     & set(_REALPC_DANGEROUS_KEYS)
+            _REALPC_BASE64_RULE_ENABLED = bool(data.get("base64_rule_enabled", True))
+            if _REALPC_UNBLOCKED_PATTERNS or _REALPC_UNBLOCKED_KEYS or not _REALPC_BASE64_RULE_ENABLED:
+                print(f"[DangerFilter] Loaded {len(_REALPC_UNBLOCKED_PATTERNS)} unblocked "
+                      f"pattern(s), {len(_REALPC_UNBLOCKED_KEYS)} unblocked key(s).")
+    except Exception as e:
+        print(f"[DangerFilter] Load unblocked-patterns error: {e}")
+
+
+def save_realpc_unblocked_patterns():
+    try:
+        with open(_REALPC_UNBLOCKED_PATTERNS_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "patterns": sorted(_REALPC_UNBLOCKED_PATTERNS),
+                "keys": sorted(_REALPC_UNBLOCKED_KEYS),
+                "base64_rule_enabled": _REALPC_BASE64_RULE_ENABLED,
+            }, f, indent=2)
+        print("[DangerFilter] Unblocked-patterns config saved.")
+    except Exception as e:
+        print(f"[DangerFilter] Save unblocked-patterns error: {e}")
 
 
 def _realpc_buffer_get(username: str) -> str:
@@ -2767,18 +2985,23 @@ def _realpc_scan_text_for_danger(text: str):
     Keyword matching is case-insensitive and whitespace-stripped (evasion-
     resistant). The base64 check runs on the CASE-PRESERVED text, since the
     upper/lower/digit mix is exactly the signal that tells a real base64
-    payload apart from an ordinary long sentence with its spaces removed."""
+    payload apart from an ordinary long sentence with its spaces removed.
+    Patterns the operator has manually unblocked (see the "View Blocked
+    List" popup) are skipped — see _REALPC_UNBLOCKED_PATTERNS above."""
     compact_cased = "".join(text.split())
     compact_lower = compact_cased.lower()
 
     for pattern in _REALPC_DANGEROUS_TEXT_PATTERNS:
+        if pattern in _REALPC_UNBLOCKED_PATTERNS:
+            continue
         pattern_compact = "".join(pattern.lower().split())
         if pattern_compact and pattern_compact in compact_lower:
             return pattern
 
-    for m in _REALPC_BASE64_BLOB_RE.finditer(compact_cased):
-        if _realpc_looks_like_base64(m.group()):
-            return "long base64 payload"
+    if _REALPC_BASE64_RULE_ENABLED:
+        for m in _REALPC_BASE64_BLOB_RE.finditer(compact_cased):
+            if _realpc_looks_like_base64(m.group()):
+                return "long base64 payload"
 
     return None
 
@@ -2823,7 +3046,7 @@ def _realpc_is_dangerous(action: str, args: str, username: str):
 
     if action in ("key", "press"):
         key = text.strip().lower()
-        if key in _REALPC_DANGEROUS_KEYS:
+        if key in _REALPC_DANGEROUS_KEYS and key not in _REALPC_UNBLOCKED_KEYS:
             return f"dangerous key blocked: {key}"
 
     # ── Rolling typing-buffer check ──
@@ -2917,7 +3140,7 @@ def _vm_is_dangerous(action: str, args: str, username: str):
 
     if action in ("key", "press"):
         key = text.strip().lower()
-        if key in _REALPC_DANGEROUS_KEYS:
+        if key in _REALPC_DANGEROUS_KEYS and key not in _REALPC_UNBLOCKED_KEYS:
             return f"dangerous key blocked: {key}"
 
     buf = _vm_buffer_get(username)
@@ -4582,6 +4805,42 @@ def send_scancode(scancode_str):
             time.sleep(0.008)
     except Exception as e:
         print(f"[Scancode] Error: {e}")
+
+# ── !hold / !keydown safety net ──
+# Sending a key's "down" scancode with no guaranteed "up" leaves that key
+# stuck held in the VM forever if a custom command's author forgets (or
+# never intends) to add a matching "release" step. This tracks one
+# pending auto-release timer per key and fires it no matter what, so a
+# held key is *always* released within HOLD_KEY_MAX_SECONDS — a manual
+# "release"/"keyup" step just cancels the timer and releases early.
+HOLD_KEY_MAX_SECONDS = 5.0
+_key_hold_timers = {}
+_key_hold_timers_lock = threading.Lock()
+
+def _schedule_key_auto_release(key: str, seconds: float):
+    seconds = max(0.05, min(seconds, HOLD_KEY_MAX_SECONDS))
+
+    def _release():
+        with _key_hold_timers_lock:
+            _key_hold_timers.pop(key, None)
+        if key in SCANCODES:
+            send_scancode(SCANCODES[key][1])
+            print(f"[Hold] Auto-released '{key}' after {seconds}s.")
+
+    with _key_hold_timers_lock:
+        old = _key_hold_timers.pop(key, None)
+        if old:
+            old.cancel()   # a fresh !hold on the same key restarts the clock
+        timer = threading.Timer(seconds, _release)
+        timer.daemon = True
+        _key_hold_timers[key] = timer
+        timer.start()
+
+def _cancel_key_auto_release(key: str):
+    with _key_hold_timers_lock:
+        timer = _key_hold_timers.pop(key, None)
+    if timer:
+        timer.cancel()
 
 def send_special_enter():
     send_scancode('1c')
@@ -7165,60 +7424,142 @@ class NexovativeControlCenter:
 
     def _show_blocked_commands_list(self):
         """
-        Shows a read-only popup listing every dangerous text pattern, key,
-        and the base64-blob rule the Danger Filter currently checks against
-        (same list used by both the Real PC and VM filters — they share
-        _REALPC_DANGEROUS_TEXT_PATTERNS). Purely informational — does not
-        edit the list or the filter's on/off state.
+        Shows the Danger Filter's full pattern list as checkboxes — one
+        per text pattern, one per standalone key, plus one for the
+        base64-blob heuristic. Checked = still blocked (default state).
+        Unchecking a box and clicking Save adds it to
+        _REALPC_UNBLOCKED_PATTERNS / _REALPC_UNBLOCKED_KEYS, which
+        _realpc_scan_text_for_danger() skips from then on — for both
+        Real PC Control and the VM, since they share the same lists.
+        Changes apply immediately (no restart needed) and persist to
+        realpc_unblocked_patterns.json.
         """
+        global _REALPC_UNBLOCKED_PATTERNS, _REALPC_UNBLOCKED_KEYS, _REALPC_BASE64_RULE_ENABLED
+
         win = tk.Toplevel(self.root)
         win.title("🛡 Danger Filter — Blocked Commands")
         win.configure(bg=self.BG)
-        win.geometry("560x600")
+        win.geometry("600x640")
         win.transient(self.root)
 
         tk.Label(win, text="🛡 Danger Filter — Blocked Patterns",
                  bg=self.BG, fg=self.TEXT, font=("Segoe UI", 12, "bold")
                  ).pack(anchor="w", padx=14, pady=(14, 2))
         tk.Label(win,
-                 text="Any of these, typed via chat (in one go, or spelled out "
-                      "across multiple !type/!key steps), is blocked in both "
-                      "Real PC Control and the VM — whenever the Danger Filter "
-                      "is enabled.",
+                 text="Checked = blocked (default). Uncheck anything you want to "
+                      "allow through, then click Save. Applies to both Real PC "
+                      "Control and the VM immediately — no restart needed.",
                  bg=self.BG, fg=self.TEXTDIM, font=("Segoe UI", 9),
-                 wraplength=520, justify="left").pack(anchor="w", padx=14, pady=(0, 10))
+                 wraplength=560, justify="left").pack(anchor="w", padx=14, pady=(0, 8))
 
-        text_frame = tk.Frame(win, bg=self.BG)
-        text_frame.pack(fill="both", expand=True, padx=14, pady=(0, 10))
-        scrollbar = tk.Scrollbar(text_frame)
-        scrollbar.pack(side="right", fill="y")
-        listbox_text = tk.Text(text_frame, bg=self.BG2, fg=self.TEXT,
-                                font=("Segoe UI Mono", 9), wrap="word",
-                                yscrollcommand=scrollbar.set, relief="flat",
-                                padx=10, pady=8)
-        listbox_text.pack(side="left", fill="both", expand=True)
-        scrollbar.config(command=listbox_text.yview)
+        # ── Bottom-anchored controls, packed BEFORE the scrollable list so
+        # they always stay visible regardless of how long the list is. ──
+        btn_row = tk.Frame(win, bg=self.BG)
+        btn_row.pack(side="bottom", fill="x", padx=14, pady=(6, 14))
 
-        lines = []
-        lines.append(f"Text patterns blocked ({len(_REALPC_DANGEROUS_TEXT_PATTERNS)}):")
-        lines.append("")
-        for p in _REALPC_DANGEROUS_TEXT_PATTERNS:
-            lines.append(f"  • {p}")
-        lines.append("")
-        lines.append(f"Standalone keys blocked ({len(_REALPC_DANGEROUS_KEYS)}):")
-        lines.append("")
+        status_lbl = tk.Label(win, text="", bg=self.BG, fg=self.GREEN,
+                               font=("Segoe UI", 9))
+        status_lbl.pack(side="bottom", pady=(0, 4))
+
+        # Vars, created up front so Save/Select-All/Block-All can all see them
+        pattern_vars = {}   # pattern -> BooleanVar (True = blocked)
+        key_vars     = {}   # key -> BooleanVar
+        base64_var   = tk.BooleanVar(value=_REALPC_BASE64_RULE_ENABLED)
+
+        def _save_changes():
+            global _REALPC_UNBLOCKED_PATTERNS, _REALPC_UNBLOCKED_KEYS, _REALPC_BASE64_RULE_ENABLED
+            _REALPC_UNBLOCKED_PATTERNS = {p for p, v in pattern_vars.items() if not v.get()}
+            _REALPC_UNBLOCKED_KEYS     = {k for k, v in key_vars.items() if not v.get()}
+            _REALPC_BASE64_RULE_ENABLED = base64_var.get()
+            save_realpc_unblocked_patterns()
+            n_unblocked = len(_REALPC_UNBLOCKED_PATTERNS) + len(_REALPC_UNBLOCKED_KEYS)
+            status_lbl.configure(
+                text=f"✅ Saved — {n_unblocked} item(s) unblocked." if n_unblocked
+                     else "✅ Saved — everything is blocked (default).")
+
+        def _select_all(state: bool):
+            for v in pattern_vars.values():
+                v.set(state)
+            for v in key_vars.values():
+                v.set(state)
+            base64_var.set(state)
+
+        ttk.Button(btn_row, text="💾 Save Changes", style="Green.TButton",
+                   command=_save_changes).pack(side="left")
+        ttk.Button(btn_row, text="Block All (reset)", style="Dim.TButton",
+                   command=lambda: _select_all(True)).pack(side="left", padx=(8, 0))
+        ttk.Button(btn_row, text="Unblock All", style="Dim.TButton",
+                   command=lambda: _select_all(False)).pack(side="left", padx=(8, 0))
+        ttk.Button(btn_row, text="Close", style="Dim.TButton",
+                   command=win.destroy).pack(side="right")
+
+        # ── Scrollable checkbox list ──
+        list_outer = tk.Frame(win, bg=self.BG2, highlightthickness=0)
+        list_outer.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+
+        list_canvas = tk.Canvas(list_outer, bg=self.BG2, highlightthickness=0)
+        list_scrollbar = tk.Scrollbar(list_outer, orient="vertical",
+                                       command=list_canvas.yview)
+        list_frame = tk.Frame(list_canvas, bg=self.BG2)
+
+        list_frame.bind(
+            "<Configure>",
+            lambda e: list_canvas.configure(scrollregion=list_canvas.bbox("all")))
+        list_canvas.create_window((0, 0), window=list_frame, anchor="nw", width=560)
+        list_canvas.configure(yscrollcommand=list_scrollbar.set)
+        list_canvas.pack(side="left", fill="both", expand=True)
+        list_scrollbar.pack(side="right", fill="y")
+
+        def _on_mousewheel(event):
+            list_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        list_canvas.bind("<Enter>", lambda e: list_canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        list_canvas.bind("<Leave>", lambda e: list_canvas.unbind_all("<MouseWheel>"))
+
+        def _section_header(text):
+            tk.Label(list_frame, text=text, bg=self.BG2, fg=self.ACCENT,
+                     font=("Segoe UI", 9, "bold"), anchor="w"
+                     ).pack(fill="x", padx=8, pady=(10, 2))
+
+        def _checkbox_row(label, var, desc=None):
+            row = tk.Frame(list_frame, bg=self.BG2)
+            row.pack(fill="x", padx=16, pady=2)
+            cb = tk.Checkbutton(
+                row, text=label, variable=var,
+                bg=self.BG2, fg=self.TEXT, selectcolor=self.BG3,
+                activebackground=self.BG2, activeforeground=self.TEXT,
+                font=("Segoe UI Mono", 9, "bold"), anchor="w", justify="left",
+                wraplength=500)
+            cb.pack(fill="x", anchor="w")
+            if desc:
+                tk.Label(row, text=desc, bg=self.BG2, fg=self.TEXTDIM,
+                         font=("Segoe UI", 8), anchor="w", justify="left",
+                         wraplength=490).pack(fill="x", padx=(24, 0))
+
+        _section_header(f"Text patterns ({len(_REALPC_DANGEROUS_TEXT_PATTERNS)}):")
+        for p, desc in _REALPC_DANGEROUS_TEXT_PATTERNS_WITH_DESC:
+            v = tk.BooleanVar(value=(p not in _REALPC_UNBLOCKED_PATTERNS))
+            pattern_vars[p] = v
+            _checkbox_row(p, v, desc)
+
+        _REALPC_DANGEROUS_KEYS_DESC = {
+            "delete": "Sends the Delete key — can remove selected files/text",
+            "del":    "Sends the Delete key — can remove selected files/text",
+            "printscreen": "Takes a screenshot to the clipboard — usually harmless, blocked as a precaution",
+        }
+        _section_header(f"Standalone keys ({len(_REALPC_DANGEROUS_KEYS)}):")
         for k in sorted(_REALPC_DANGEROUS_KEYS):
-            lines.append(f"  • {k}")
-        lines.append("")
-        lines.append(f"Also blocked: any unbroken run of {_REALPC_BASE64_BLOB_MIN_LEN}+ "
-                      f"base64-alphabet characters that statistically looks like "
-                      f"encoded binary data (a long base64 payload).")
+            v = tk.BooleanVar(value=(k not in _REALPC_UNBLOCKED_KEYS))
+            key_vars[k] = v
+            _checkbox_row(k, v, _REALPC_DANGEROUS_KEYS_DESC.get(k))
 
-        listbox_text.insert("1.0", "\n".join(lines))
-        listbox_text.configure(state="disabled")
+        _section_header("Base64 payload detection:")
+        _checkbox_row(
+            "long base64 payload",
+            base64_var,
+            f"Blocks any unbroken run of {_REALPC_BASE64_BLOB_MIN_LEN}+ base64-alphabet "
+            f"characters that statistically looks like encoded binary data — e.g. an "
+            f"image or file smuggled in as text and decoded straight to disk.")
 
-        ttk.Button(win, text="Close", style="Dim.TButton",
-                   command=win.destroy).pack(pady=(0, 14))
 
     def _change_chat_backend(self):
         _show_chat_backend_dialog()   # blocks until the user picks something
@@ -11580,6 +11921,7 @@ if __name__ == '__main__':
     load_multi_stream_config()
     load_scheduler_config()
     load_realpc_config()
+    load_realpc_unblocked_patterns()
     load_reconnect_config()
     load_nexoai_config()
     load_vm_danger_filter_config()
